@@ -1,0 +1,13 @@
+services:
+  jobs:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/data              # Персистентные данные (сессия, БД)
+      - jobs-workspace:/workspace  # Рабочая директория Claude
+    restart: unless-stopped
+    stdin_open: true              # Для интерактивного логина
+    tty: true
+
+volumes:
+  jobs-workspace:                 # Named volume для workspace
