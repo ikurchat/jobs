@@ -35,11 +35,11 @@ class TelegramHandlers:
         )
         logger.info(f"Registered message handler for user {settings.tg_user_id}")
 
-    async def _set_typing(self, chat_id: int, typing: bool = True) -> None:
+    async def _set_typing(self, chat, typing: bool = True) -> None:
         """Устанавливает статус 'печатает'."""
         try:
             action = SendMessageTypingAction() if typing else SendMessageCancelAction()
-            await self.client(SetTypingRequest(peer=chat_id, action=action))
+            await self.client(SetTypingRequest(peer=chat, action=action))
         except Exception as e:
             logger.debug(f"Failed to set typing status: {e}")
 
@@ -47,15 +47,20 @@ class TelegramHandlers:
         """Обрабатывает входящее сообщение."""
         message = event.message
         prompt = message.text
-        chat_id = message.chat_id
 
         if not prompt:
             return
 
         logger.info(f"Received message: {prompt[:100]}...")
 
+        # Получаем input chat для typing status и read acknowledge
+        input_chat = await event.get_input_chat()
+
+        # Отмечаем сообщение как прочитанное
+        await self.client.send_read_acknowledge(input_chat, message)
+
         # Включаем статус "печатает"
-        await self._set_typing(chat_id, True)
+        await self._set_typing(input_chat, True)
 
         session = get_session()
         status_msg = None
@@ -70,7 +75,7 @@ class TelegramHandlers:
 
                 # Поддерживаем статус "печатает"
                 if now - last_progress_update > PROGRESS_UPDATE_INTERVAL:
-                    await self._set_typing(chat_id, True)
+                    await self._set_typing(input_chat, True)
                     last_progress_update = now
 
                 if update.tool_name:
@@ -98,7 +103,7 @@ class TelegramHandlers:
 
         finally:
             # Выключаем статус "печатает"
-            await self._set_typing(chat_id, False)
+            await self._set_typing(input_chat, False)
 
         # Отправляем финальный ответ
         if not final_content:

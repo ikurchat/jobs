@@ -16,6 +16,9 @@ from loguru import logger
 from src.config import settings
 
 
+SESSION_FILE = settings.data_dir / "claude_session_id"
+
+
 @dataclass
 class ProgressUpdate:
     """Промежуточное обновление от Claude."""
@@ -35,6 +38,23 @@ class ClaudeResponse:
     is_error: bool = False
 
 
+def _load_session_id() -> str | None:
+    """Загружает session_id из файла."""
+    if SESSION_FILE.exists():
+        session_id = SESSION_FILE.read_text().strip()
+        if session_id:
+            logger.info(f"Loaded session: {session_id[:8]}...")
+            return session_id
+    return None
+
+
+def _save_session_id(session_id: str) -> None:
+    """Сохраняет session_id в файл."""
+    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SESSION_FILE.write_text(session_id)
+    logger.debug(f"Saved session: {session_id[:8]}...")
+
+
 class ClaudeSession:
     """
     Сессия Claude Code с сохранением контекста между сообщениями.
@@ -42,8 +62,7 @@ class ClaudeSession:
     """
 
     def __init__(self):
-        self._client: ClaudeSDKClient | None = None
-        self._session_id: str | None = None
+        self._session_id: str | None = _load_session_id()
 
     def _get_options(self) -> ClaudeAgentOptions:
         """Создаёт опции для клиента."""
@@ -92,6 +111,10 @@ class ClaudeSession:
 
                     elif isinstance(message, ResultMessage):
                         self._session_id = message.session_id
+                        # Сохраняем сессию для персистентности
+                        if self._session_id:
+                            _save_session_id(self._session_id)
+
                         final_text = "".join(text_buffer)
                         yield ProgressUpdate(
                             text=final_text,
@@ -120,6 +143,13 @@ class ClaudeSession:
 
         response.session_id = self._session_id
         return response
+
+    def reset_session(self) -> None:
+        """Сбрасывает сессию (начинает новый разговор)."""
+        self._session_id = None
+        if SESSION_FILE.exists():
+            SESSION_FILE.unlink()
+        logger.info("Session reset")
 
 
 # Глобальная сессия для пользователя (singleton)
