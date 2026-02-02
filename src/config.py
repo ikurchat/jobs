@@ -11,8 +11,8 @@ class Settings(BaseSettings):
     tg_api_hash: str
     tg_user_id: int  # Telegram ID владельца для авторизации команд
 
-    # Claude
-    anthropic_api_key: str
+    # Claude (API key опционален при OAuth)
+    anthropic_api_key: str | None = None
     http_proxy: str = "http://PbxzTVqF:NjR4RB3u@45.199.204.185:62176"
 
     # Paths

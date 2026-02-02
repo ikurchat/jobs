@@ -24,7 +24,7 @@ RUN pip install --no-cache-dir .
 COPY src/ /app/src/
 
 # Создаём рабочие директории
-RUN mkdir -p /workspace /data
+RUN mkdir -p /workspace /data /root/.claude
 
 # Рабочая директория для Claude
 WORKDIR /app

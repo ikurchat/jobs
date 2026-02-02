@@ -43,13 +43,12 @@ async def run_claude(
     cwd.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
-    env.update(
-        {
-            "ANTHROPIC_API_KEY": settings.anthropic_api_key,
-            "HTTP_PROXY": settings.http_proxy,
-            "HTTPS_PROXY": settings.http_proxy,
-        }
-    )
+    env["HTTP_PROXY"] = settings.http_proxy
+    env["HTTPS_PROXY"] = settings.http_proxy
+
+    # API key опционален при OAuth авторизации
+    if settings.anthropic_api_key:
+        env["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
 
     cmd = [
         "claude",

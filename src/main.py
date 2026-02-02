@@ -4,9 +4,9 @@ import sys
 from loguru import logger
 
 from src.config import settings
-from src.telegram.client import create_client, load_session_string, save_session_string
-from src.telegram.auth import interactive_auth
+from src.telegram.client import create_client, load_session_string
 from src.telegram.handlers import TelegramHandlers
+from src.setup import run_setup, is_telegram_configured, is_claude_configured
 
 
 def setup_logging() -> None:
@@ -24,34 +24,31 @@ async def main() -> None:
     setup_logging()
 
     logger.info("Starting Jobs - Personal AI Assistant")
-    logger.info(f"Data directory: {settings.data_dir}")
-    logger.info(f"Workspace: {settings.workspace_dir}")
 
-    # Создаём директории
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-    settings.workspace_dir.mkdir(parents=True, exist_ok=True)
+    # Проверяем нужен ли setup
+    needs_setup = not is_telegram_configured() or not is_claude_configured()
 
-    # Загружаем сессию
+    if needs_setup:
+        logger.info("Требуется первоначальная настройка")
+        success = await run_setup()
+        if not success:
+            logger.error("Setup не завершён, выход")
+            sys.exit(1)
+
+    # Загружаем сессию и запускаем бота
     session_string = load_session_string()
     client = create_client(session_string)
 
-    # Авторизация
     try:
         await client.connect()
 
         if not await client.is_user_authorized():
-            logger.info("Требуется авторизация в Telegram")
-            await interactive_auth(client)
-            # Перезагружаем клиент с новой сессией
-            session_string = load_session_string()
-            await client.disconnect()
-            client = create_client(session_string)
-            await client.connect()
+            logger.error("Telegram сессия невалидна. Удалите data/telethon.session и перезапустите")
+            sys.exit(1)
 
         me = await client.get_me()
         logger.info(f"Logged in as {me.first_name} (ID: {me.id})")
 
-        # Проверяем, что tg_user_id совпадает
         if me.id != settings.tg_user_id:
             logger.warning(
                 f"Logged in user ID ({me.id}) != configured TG_USER_ID ({settings.tg_user_id})"
@@ -59,7 +56,7 @@ async def main() -> None:
             logger.warning("Бот будет отвечать только на сообщения от TG_USER_ID")
 
     except Exception as e:
-        logger.error(f"Ошибка авторизации: {e}")
+        logger.error(f"Ошибка подключения: {e}")
         raise
 
     # Регистрируем обработчики
@@ -68,7 +65,6 @@ async def main() -> None:
 
     logger.info("Bot is running. Send me a message!")
 
-    # Запускаем event loop
     await client.run_until_disconnected()
 
 
