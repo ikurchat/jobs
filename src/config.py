@@ -7,20 +7,28 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 def _detect_system_timezone() -> str:
     """Определяет системный timezone."""
+    import os
+
+    # Сначала смотрим явную переменную TZ
+    tz_env = os.environ.get("TZ")
+    if tz_env:
+        return tz_env
+
     try:
         # Пробуем получить из системы
         local_tz = datetime.now().astimezone().tzinfo
-        if local_tz and hasattr(local_tz, 'key'):
-            return local_tz.key
-        # Fallback - смотрим offset и угадываем
-        offset = datetime.now().astimezone().utcoffset()
-        if offset:
-            hours = offset.total_seconds() / 3600
-            if hours == 3:
+        if local_tz:
+            # Проверяем offset - если 0, это скорее всего UTC в Docker
+            offset = datetime.now().astimezone().utcoffset()
+            if offset and offset.total_seconds() == 0:
+                # UTC в Docker - возвращаем Moscow как default
                 return "Europe/Moscow"
+            if hasattr(local_tz, 'key'):
+                return local_tz.key
     except Exception:
         pass
-    return "Europe/Moscow"  # Default
+
+    return "Europe/Moscow"  # Default для России
 
 
 class Settings(BaseSettings):
