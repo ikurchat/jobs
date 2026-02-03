@@ -20,6 +20,7 @@ from loguru import logger
 from src.config import settings
 from src.tools import create_tools_server, TOOL_NAMES
 from src.prompts import SYSTEM_PROMPT
+from src.mcp_manager.config import get_mcp_config
 
 
 @dataclass
@@ -79,11 +80,19 @@ class ClaudeSession:
         if settings.anthropic_api_key:
             env["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
 
+        # Собираем MCP серверы: наш jobs + внешние из конфига
+        mcp_servers = {"jobs": self._tools_server}
+
+        # Добавляем внешние MCP серверы
+        mcp_config = get_mcp_config()
+        external_servers = mcp_config.to_mcp_json()
+        mcp_servers.update(external_servers)
+
         options = ClaudeAgentOptions(
             cwd=Path(settings.workspace_dir),
             permission_mode="bypassPermissions",
             env=env,
-            mcp_servers={"jobs": self._tools_server},
+            mcp_servers=mcp_servers,
             allowed_tools=TOOL_NAMES,
             system_prompt=system_prompt or SYSTEM_PROMPT,
         )

@@ -11,12 +11,14 @@ from claude_agent_sdk import create_sdk_mcp_server
 
 from src.tools.scheduler import SCHEDULER_TOOLS
 from src.memory.tools import MEMORY_TOOLS, MEMORY_TOOL_NAMES
+from src.mcp_manager.tools import MCP_MANAGER_TOOLS, MCP_MANAGER_TOOL_NAMES
 
 
 # Список всех tools из всех модулей
 ALL_TOOLS = [
     *SCHEDULER_TOOLS,
     *MEMORY_TOOLS,
+    *MCP_MANAGER_TOOLS,
 ]
 
 # Названия tools для allowed_tools
@@ -27,6 +29,8 @@ TOOL_NAMES = [
     "mcp__jobs__cancel_scheduled_task",
     # Memory
     *MEMORY_TOOL_NAMES,
+    # MCP Manager
+    *MCP_MANAGER_TOOL_NAMES,
 ]
 
 
