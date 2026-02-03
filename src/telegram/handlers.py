@@ -137,6 +137,9 @@ class TelegramHandlers:
                             tool_msg = None
                         await event.reply(self._prepare_response(prompt, text_clean))
                         has_sent_anything = True
+                        # Восстанавливаем typing после отправки
+                        await self._set_typing(input_chat, typing=True)
+                        last_typing = asyncio.get_event_loop().time()
 
                 # Финальный ответ — только если ничего не отправляли
                 elif is_final and text and not has_sent_anything:
