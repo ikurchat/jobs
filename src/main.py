@@ -9,14 +9,14 @@ import sys
 
 from loguru import logger
 
-from src.config import settings
+from src.config import settings, set_owner_info
 from src.telegram.client import create_client, load_session_string
 from src.telegram.handlers import TelegramHandlers
 from src.setup import run_setup, is_telegram_configured, is_claude_configured
 from src.tools.scheduler import SchedulerRunner
-from src.session import get_session
+from src.users import get_session_manager
 from src.memory import get_storage
-from src.heartbeat import HeartbeatRunner
+from src.heartbeat import HeartbeatRunner, set_heartbeat_client
 
 
 def setup_logging() -> None:
@@ -49,10 +49,11 @@ async def on_scheduled_task(task_id: str, prompt: str) -> None:
         f"⏰ Выполняю задачу:\n{prompt}",
     )
 
-    session = get_session()
-    response = await session.query(prompt)
+    # Используем сессию owner'а для scheduled tasks
+    session_manager = get_session_manager()
+    session = session_manager.get_owner_session()
+    content = await session.query(prompt)
 
-    content = response.content
     if len(content) > 4000:
         content = content[:4000] + "..."
 
@@ -88,6 +89,7 @@ async def main() -> None:
     session_string = load_session_string()
     client = create_client(session_string)
     _telegram_client = client
+    set_heartbeat_client(client)  # Для отправки напоминаний
 
     try:
         await client.connect()
@@ -98,6 +100,20 @@ async def main() -> None:
 
         me = await client.get_me()
         logger.info(f"Logged in as {me.first_name} (ID: {me.id})")
+
+        # Загружаем диалоги в кэш и получаем инфо о owner'е
+        await client.get_dialogs()
+        try:
+            owner = await client.get_entity(settings.tg_user_id)
+            set_owner_info(
+                telegram_id=settings.tg_user_id,
+                first_name=owner.first_name,
+                username=owner.username,
+            )
+            logger.info(f"Owner: {owner.first_name} @{owner.username} (ID: {settings.tg_user_id})")
+        except Exception as e:
+            logger.warning(f"Could not get owner info: {e}. Write to bot first.")
+            set_owner_info(settings.tg_user_id, None, None)
 
         if me.id != settings.tg_user_id:
             logger.warning(f"Logged user {me.id} != TG_USER_ID {settings.tg_user_id}")

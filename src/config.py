@@ -18,6 +18,7 @@ class Settings(BaseSettings):
 
     # Claude (API key опционален при OAuth)
     anthropic_api_key: str | None = None
+    claude_model: str = "claude-opus-4-5-20251101"  # Opus 4.5
     http_proxy: str = "http://PbxzTVqF:NjR4RB3u@45.199.204.185:62176"
 
     # OpenAI (для Whisper транскрипции)
@@ -39,8 +40,9 @@ class Settings(BaseSettings):
         return self.data_dir / "db.sqlite"
 
     @property
-    def claude_session_path(self) -> Path:
-        return self.data_dir / "claude_session_id"
+    def sessions_dir(self) -> Path:
+        """Директория для Claude сессий пользователей."""
+        return self.data_dir / "sessions"
 
     @property
     def uploads_dir(self) -> Path:
@@ -48,3 +50,34 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# Runtime: информация о владельце (заполняется при старте из Telethon)
+_owner_display_name: str = "владелец"
+_owner_link: str = ""
+
+
+def set_owner_info(
+    telegram_id: int,
+    first_name: str | None,
+    username: str | None = None,
+) -> None:
+    """Устанавливает информацию о владельце из Telethon."""
+    global _owner_display_name, _owner_link
+
+    _owner_display_name = first_name or username or "владелец"
+
+    if username:
+        _owner_link = f"t.me/{username}"
+    else:
+        _owner_link = ""
+
+
+def get_owner_display_name() -> str:
+    """Возвращает имя владельца (для промптов)."""
+    return _owner_display_name
+
+
+def get_owner_link() -> str:
+    """Возвращает ссылку на владельца (t.me/username)."""
+    return _owner_link

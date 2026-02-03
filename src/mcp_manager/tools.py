@@ -9,7 +9,10 @@ from loguru import logger
 
 from src.mcp_manager.registry import MCPRegistry
 from src.mcp_manager.config import get_mcp_config, save_mcp_config
-from src.session import get_session
+
+# NOTE: get_session_manager импортируется внутри функций (lazy import)
+# чтобы избежать циклического импорта:
+# src.users → session_manager → src.tools → mcp_manager.tools → src.users
 
 
 @tool(
@@ -99,7 +102,8 @@ async def mcp_install(args: dict[str, Any]) -> dict[str, Any]:
     ]
 
     # Сбрасываем сессию чтобы новые MCP подхватились
-    get_session().reset()
+    from src.users import get_session_manager
+    get_session_manager().reset_all()
 
     return _text("\n".join(lines))
 
@@ -131,7 +135,8 @@ async def mcp_set_env(args: dict[str, Any]) -> dict[str, Any]:
     save_mcp_config()
 
     # Сбрасываем сессию
-    get_session().reset()
+    from src.users import get_session_manager
+    get_session_manager().reset_all()
 
     return _text(f"✅ Установлено {name}.env.{key}\n\n🔄 Сессия перезапустится при следующем сообщении.")
 
@@ -180,7 +185,8 @@ async def mcp_enable(args: dict[str, Any]) -> dict[str, Any]:
 
     if config.enable_server(name):
         save_mcp_config()
-        get_session().reset()
+        from src.users import get_session_manager
+        get_session_manager().reset_all()
         return _text(f"✅ MCP сервер **{name}** включён\n\n🔄 Сессия перезапустится при следующем сообщении.")
 
     return _error(f"Сервер '{name}' не найден")
@@ -204,7 +210,8 @@ async def mcp_disable(args: dict[str, Any]) -> dict[str, Any]:
 
     if config.disable_server(name):
         save_mcp_config()
-        get_session().reset()
+        from src.users import get_session_manager
+        get_session_manager().reset_all()
         return _text(f"⏸️ MCP сервер **{name}** отключён\n\n🔄 Сессия перезапустится при следующем сообщении.")
 
     return _error(f"Сервер '{name}' не найден")
@@ -228,7 +235,8 @@ async def mcp_remove(args: dict[str, Any]) -> dict[str, Any]:
 
     if config.remove_server(name):
         save_mcp_config()
-        get_session().reset()
+        from src.users import get_session_manager
+        get_session_manager().reset_all()
         return _text(f"🗑️ MCP сервер **{name}** удалён\n\n🔄 Сессия перезапустится при следующем сообщении.")
 
     return _error(f"Сервер '{name}' не найден")

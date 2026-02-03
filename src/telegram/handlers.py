@@ -1,5 +1,9 @@
 """
 Telegram Handlers — обработка входящих сообщений.
+
+Поддерживает multi-session архитектуру:
+- Owner (tg_user_id) — полный доступ
+- External users — ограниченный доступ с отдельными сессиями
 """
 
 import asyncio
@@ -11,8 +15,9 @@ from telethon.tl.types import SendMessageTypingAction, SendMessageCancelAction
 from telegraph import Telegraph
 from loguru import logger
 
-from src.config import settings
-from src.session import get_session
+from src.config import settings, set_owner_info
+from src.users import get_session_manager, get_users_repository
+from src.users.tools import set_current_user, set_telegram_sender
 from src.media import transcribe_audio, save_media
 
 MAX_TG_LENGTH = 4000
@@ -27,17 +32,32 @@ class TelegramHandlers:
         self._telegraph = Telegraph()
         self._telegraph_ready = False
 
+        # Настраиваем sender для user tools
+        set_telegram_sender(self._send_message)
+
     def register(self) -> None:
         """Регистрирует обработчики событий."""
+        # Принимаем сообщения от всех пользователей (не только owner)
         self._client.add_event_handler(
             self._on_message,
-            events.NewMessage(from_users=[settings.tg_user_id]),
+            events.NewMessage(incoming=True),
         )
-        logger.info(f"Registered handler for user {settings.tg_user_id}")
+        logger.info(f"Registered handler for all users (owner: {settings.tg_user_id})")
+
+    async def _send_message(self, user_id: int, text: str) -> None:
+        """Отправляет сообщение пользователю (для user tools)."""
+        await self._client.send_message(user_id, text)
 
     async def _on_message(self, event: events.NewMessage.Event) -> None:
         """Обрабатывает входящее сообщение."""
         message = event.message
+        sender = await event.get_sender()
+
+        if not sender:
+            return
+
+        user_id = sender.id
+        is_owner = user_id == settings.tg_user_id
 
         # Обработка разных типов сообщений
         prompt, media_context = await self._extract_content(message)
@@ -49,7 +69,29 @@ class TelegramHandlers:
         if media_context:
             prompt = f"{media_context}\n\n{prompt}" if prompt else media_context
 
-        logger.info(f"Received: {prompt[:100]}...")
+        logger.info(f"[{'owner' if is_owner else user_id}] Received: {prompt[:100]}...")
+
+        # Обновляем инфо owner'а из реальных данных Telegram
+        if is_owner:
+            set_owner_info(user_id, sender.first_name, sender.username)
+        else:
+            # Для external users сохраняем в БД
+            repo = get_users_repository()
+            await repo.upsert_user(
+                telegram_id=user_id,
+                username=sender.username,
+                first_name=sender.first_name,
+                last_name=sender.last_name,
+                phone=sender.phone if hasattr(sender, 'phone') else None,
+            )
+
+            # Проверяем бан
+            if await repo.is_user_banned(user_id):
+                logger.info(f"[{user_id}] Banned user, ignoring")
+                return
+
+        # Устанавливаем контекст для tools
+        set_current_user(user_id)
 
         input_chat = await event.get_input_chat()
 
@@ -59,43 +101,61 @@ class TelegramHandlers:
         # Включаем typing
         await self._set_typing(input_chat, typing=True)
 
-        session = get_session()
-        status_msg = None
+        # Получаем сессию для этого пользователя
+        session_manager = get_session_manager()
+        user_display_name = sender.first_name or sender.username or str(user_id)
+        session = session_manager.get_session(user_id, user_display_name)
+
         last_typing = asyncio.get_event_loop().time()
-        final_content = ""
+        has_sent_anything = False
+        tool_msg = None  # Сообщение со статусом tool
 
         try:
-            async for update in session.query_stream(prompt):
+            async for text, tool_name, is_final in session.query_stream(prompt):
                 # Поддерживаем typing
                 now = asyncio.get_event_loop().time()
                 if now - last_typing > TYPING_REFRESH_INTERVAL:
                     await self._set_typing(input_chat, typing=True)
                     last_typing = now
 
-                if update.tool_name:
-                    tool_display = self._format_tool(update.tool_name)
-                    if status_msg is None:
-                        status_msg = await event.reply(f"🔧 {tool_display}...")
+                # Tool call — показываем статус
+                if tool_name:
+                    tool_display = self._format_tool(tool_name)
+                    if tool_msg is None:
+                        tool_msg = await event.reply(tool_display)
                     else:
-                        await self._safe_edit(status_msg, f"🔧 {tool_display}...")
+                        await self._safe_edit(tool_msg, tool_display)
+                    continue
 
-                elif update.is_final:
-                    final_content = update.text or ""
+                # Промежуточный текст — отправляем отдельным сообщением
+                if text and not is_final:
+                    text_clean = text.strip()
+                    if text_clean:
+                        # Удаляем сообщение о tool если было
+                        if tool_msg:
+                            await self._safe_delete(tool_msg)
+                            tool_msg = None
+                        await event.reply(self._prepare_response(prompt, text_clean))
+                        has_sent_anything = True
+
+                # Финальный ответ — только если ничего не отправляли
+                elif is_final and text and not has_sent_anything:
+                    final_text = text.strip()
+                    if final_text:
+                        if tool_msg:
+                            await self._safe_delete(tool_msg)
+                            tool_msg = None
+                        await event.reply(self._prepare_response(prompt, final_text))
 
         except Exception as e:
             logger.error(f"Error: {e}")
-            final_content = f"❌ Ошибка: {e}"
+            await event.reply(f"❌ Ошибка: {e}")
 
         finally:
             await self._set_typing(input_chat, typing=False)
-
-        # Отправляем результат
-        response_text = self._prepare_response(prompt, final_content)
-
-        if status_msg:
-            await self._safe_edit(status_msg, response_text)
-        else:
-            await event.reply(response_text)
+            # Удаляем tool message если остался
+            if tool_msg:
+                await self._safe_delete(tool_msg)
 
     async def _set_typing(self, chat: Any, typing: bool) -> None:
         """Устанавливает статус typing."""
@@ -111,6 +171,67 @@ class TelegramHandlers:
             await message.edit(text)
         except Exception:
             pass
+
+    async def _safe_delete(self, message: Any) -> None:
+        """Безопасно удаляет сообщение."""
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+    def _format_tool(self, tool_name: str) -> str:
+        """Форматирует название инструмента в читаемый вид."""
+        # Убираем префиксы mcp__jobs__ и mcp__*__
+        clean_name = tool_name
+        if clean_name.startswith("mcp__"):
+            parts = clean_name.split("__")
+            clean_name = parts[-1] if len(parts) > 1 else clean_name
+
+        tools_display = {
+            # Файловые операции
+            "Read": "📖 Читаю файл",
+            "Write": "✍️ Записываю файл",
+            "Edit": "✏️ Редактирую",
+            "Glob": "🔍 Ищу файлы",
+            "Grep": "🔎 Ищу в коде",
+            # Системные
+            "Bash": "💻 Выполняю команду",
+            "Task": "🤖 Запускаю агента",
+            # Веб
+            "WebFetch": "🌐 Загружаю страницу",
+            "WebSearch": "🔍 Ищу в интернете",
+            # Scheduler
+            "schedule_task": "📅 Планирую задачу",
+            "list_scheduled_tasks": "📋 Смотрю расписание",
+            "cancel_scheduled_task": "❌ Отменяю задачу",
+            # Memory
+            "memory_search": "🧠 Ищу в памяти",
+            "memory_read": "📖 Читаю память",
+            "memory_append": "💾 Сохраняю в память",
+            "memory_log": "📝 Пишу в лог",
+            "memory_context": "🧠 Загружаю контекст",
+            # MCP Manager
+            "mcp_search": "🔌 Ищу интеграцию",
+            "mcp_install": "📦 Устанавливаю",
+            "mcp_list": "📋 Список интеграций",
+            # User tools
+            "send_to_user": "📤 Отправляю сообщение",
+            "create_user_task": "📝 Создаю задачу",
+            "get_user_tasks": "📋 Смотрю задачи",
+            "resolve_user": "🔍 Ищу пользователя",
+            "list_users": "👥 Список пользователей",
+            "get_overdue_tasks": "⚠️ Проверяю просроченные",
+            "send_summary_to_owner": "📨 Отправляю сводку",
+            "get_my_tasks": "📋 Мои задачи",
+            "update_task_status": "✅ Обновляю статус",
+            # Ban tools
+            "ban_user": "🚫 Баню пользователя",
+            "unban_user": "✅ Разбаниваю",
+            "list_banned": "🚫 Список забаненных",
+            "ban_current_user": "🚫 Баню нарушителя",
+        }
+
+        return tools_display.get(clean_name, "⏳ Работаю...")
 
     async def _extract_content(self, message: Any) -> tuple[str, str | None]:
         """
@@ -160,24 +281,6 @@ class TelegramHandlers:
                 logger.error(f"Document save failed: {e}")
 
         return text, media_context
-
-    def _format_tool(self, tool_name: str) -> str:
-        """Форматирует название инструмента."""
-        icons = {
-            "Read": "📖 Читаю",
-            "Write": "✍️ Пишу",
-            "Edit": "✏️ Редактирую",
-            "Bash": "💻 Выполняю",
-            "Glob": "🔍 Ищу файлы",
-            "Grep": "🔎 Ищу в файлах",
-            "WebFetch": "🌐 Загружаю",
-            "WebSearch": "🔍 Ищу в сети",
-            "Task": "🤖 Агент",
-            "schedule_task": "📅 Планирую",
-            "list_scheduled_tasks": "📋 Список задач",
-            "cancel_scheduled_task": "❌ Отмена задачи",
-        }
-        return icons.get(tool_name, f"⚙️ {tool_name}")
 
     def _prepare_response(self, prompt: str, content: str) -> str:
         """Подготавливает ответ (Telegraph для длинных)."""
