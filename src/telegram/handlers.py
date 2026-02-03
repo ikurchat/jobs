@@ -13,6 +13,7 @@ from loguru import logger
 
 from src.config import settings
 from src.session import get_session
+from src.media import transcribe_audio, save_media
 
 MAX_TG_LENGTH = 4000
 TYPING_REFRESH_INTERVAL = 3.0
@@ -37,10 +38,16 @@ class TelegramHandlers:
     async def _on_message(self, event: events.NewMessage.Event) -> None:
         """Обрабатывает входящее сообщение."""
         message = event.message
-        prompt = message.text
 
-        if not prompt:
+        # Обработка разных типов сообщений
+        prompt, media_context = await self._extract_content(message)
+
+        if not prompt and not media_context:
             return
+
+        # Если есть медиа-контекст — добавляем к промпту
+        if media_context:
+            prompt = f"{media_context}\n\n{prompt}" if prompt else media_context
 
         logger.info(f"Received: {prompt[:100]}...")
 
@@ -104,6 +111,55 @@ class TelegramHandlers:
             await message.edit(text)
         except Exception:
             pass
+
+    async def _extract_content(self, message: Any) -> tuple[str, str | None]:
+        """
+        Извлекает контент из сообщения.
+
+        Returns:
+            (text, media_context) — текст и контекст медиа (путь к файлу или транскрипция)
+        """
+        text = message.text or ""
+        media_context = None
+
+        # Голосовое сообщение
+        if message.voice:
+            try:
+                voice_data = await self._client.download_media(message.voice, bytes)
+                result = await transcribe_audio(voice_data)
+                media_context = f"[Голосовое сообщение]: {result.text}"
+                logger.info(f"Voice transcribed: {result.text[:50]}...")
+            except Exception as e:
+                logger.error(f"Voice transcription failed: {e}")
+                media_context = f"[Голосовое сообщение — ошибка транскрипции: {e}]"
+
+        # Фото
+        elif message.photo:
+            try:
+                photo_data = await self._client.download_media(message.photo, bytes)
+                path = await save_media(photo_data, "photo.jpg", subfolder="photos")
+                media_context = f"[Фото сохранено: {path}]"
+            except Exception as e:
+                logger.error(f"Photo save failed: {e}")
+
+        # Документ (включая видео, аудио файлы)
+        elif message.document:
+            try:
+                doc = message.document
+                # Получаем имя файла из атрибутов
+                filename = "document"
+                for attr in doc.attributes:
+                    if hasattr(attr, "file_name"):
+                        filename = attr.file_name
+                        break
+
+                doc_data = await self._client.download_media(doc, bytes)
+                path = await save_media(doc_data, filename, subfolder="documents")
+                media_context = f"[Файл сохранён: {path}]"
+            except Exception as e:
+                logger.error(f"Document save failed: {e}")
+
+        return text, media_context
 
     def _format_tool(self, tool_name: str) -> str:
         """Форматирует название инструмента."""

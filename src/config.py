@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     http_proxy: str = "http://PbxzTVqF:NjR4RB3u@45.199.204.185:62176"
 
+    # OpenAI (для Whisper транскрипции)
+    openai_api_key: str | None = None
+
     # Paths
     data_dir: Path = Path("/data")
     workspace_dir: Path = Path("/workspace")
@@ -35,6 +38,10 @@ class Settings(BaseSettings):
     @property
     def claude_session_path(self) -> Path:
         return self.data_dir / "claude_session_id"
+
+    @property
+    def uploads_dir(self) -> Path:
+        return self.workspace_dir / "uploads"
 
 
 settings = Settings()
