@@ -4,9 +4,10 @@ MCP Tools — инструменты для работы с пользовате
 Два набора:
 - OWNER_TOOLS — для owner'а (управление пользователями)
 - EXTERNAL_USER_TOOLS — для внешних пользователей (ограниченный доступ)
+
+User ID передаётся в метаданных каждого сообщения: [id: 123 | @username | Name]
 """
 
-from contextvars import ContextVar
 from datetime import datetime
 from typing import Any, Callable, Awaitable
 
@@ -16,34 +17,14 @@ from loguru import logger
 from .repository import get_users_repository
 
 
-# =============================================================================
-# Context — thread-safe контекст через contextvars
-# =============================================================================
-
-# ContextVar для текущего пользователя (thread-safe, async-safe)
-_current_user_id_var: ContextVar[int | None] = ContextVar("current_user_id", default=None)
-
 # Telegram sender (устанавливается один раз при старте)
 _telegram_sender: Callable[[int, str], Awaitable[None]] | None = None
-
-
-def set_current_user(telegram_id: int) -> None:
-    """Устанавливает текущего пользователя для tools (async-safe)."""
-    _current_user_id_var.set(telegram_id)
 
 
 def set_telegram_sender(sender: Callable[[int, str], Awaitable[None]]) -> None:
     """Устанавливает функцию отправки сообщений в Telegram."""
     global _telegram_sender
     _telegram_sender = sender
-
-
-def _get_current_user_id() -> int:
-    """Получает ID текущего пользователя (async-safe)."""
-    user_id = _current_user_id_var.get()
-    if user_id is None:
-        raise RuntimeError("Current user not set")
-    return user_id
 
 
 # =============================================================================
@@ -215,6 +196,100 @@ async def list_users(args: dict[str, Any]) -> dict[str, Any]:
 
 
 @tool(
+    "start_conversation",
+    "Start a conversation task with a user. Used for delegated negotiations (meetings, questions). "
+    "Creates a task and sends initial message to user's session with context.",
+    {"user": str, "task_type": str, "title": str, "context": dict, "initial_message": str},
+)
+async def start_conversation(args: dict[str, Any]) -> dict[str, Any]:
+    """
+    Начинает задачу согласования с пользователем.
+
+    task_type: meeting, question, custom
+    context: контекст для сессии пользователя (например, временные слоты для встречи)
+    initial_message: первое сообщение пользователю
+    """
+    user_query = args.get("user")
+    task_type = args.get("task_type", "custom")
+    title = args.get("title", "")
+    context = args.get("context", {})
+    initial_message = args.get("initial_message")
+
+    if not user_query or not initial_message:
+        return _error("user и initial_message обязательны")
+
+    repo = get_users_repository()
+    user = await repo.find_user(user_query)
+
+    if not user:
+        return _error(f"Пользователь '{user_query}' не найден")
+
+    from src.config import settings
+
+    # Создаём ConversationTask
+    conv_task = await repo.create_conversation_task(
+        owner_id=settings.tg_user_id,
+        user_id=user.telegram_id,
+        task_type=task_type,
+        title=title,
+        context=context,
+    )
+
+    # Отправляем сообщение пользователю
+    if _telegram_sender:
+        try:
+            await _telegram_sender(user.telegram_id, initial_message)
+            logger.info(f"Conversation [{conv_task.id}] started with {user.display_name}")
+        except Exception as e:
+            return _error(f"Ошибка отправки: {e}")
+    else:
+        return _error("Telegram sender не настроен")
+
+    return _text(
+        f"Задача согласования [{conv_task.id}] создана\n"
+        f"Тип: {task_type}\n"
+        f"С кем: {user.display_name}\n"
+        f"Сообщение отправлено"
+    )
+
+
+@tool(
+    "get_conversation_status",
+    "Get status of a conversation task",
+    {"task_id": str},
+)
+async def get_conversation_status(args: dict[str, Any]) -> dict[str, Any]:
+    """Получает статус задачи согласования."""
+    task_id = args.get("task_id")
+
+    if not task_id:
+        return _error("task_id обязателен")
+
+    repo = get_users_repository()
+    task = await repo.get_conversation_task(task_id)
+
+    if not task:
+        return _error(f"Задача [{task_id}] не найдена")
+
+    user = await repo.get_user(task.user_id)
+    user_name = user.display_name if user else str(task.user_id)
+
+    result_str = ""
+    if task.result:
+        import json
+        result_str = f"\nРезультат: {json.dumps(task.result, ensure_ascii=False, indent=2)}"
+
+    return _text(
+        f"Задача [{task_id}]\n"
+        f"Тип: {task.task_type}\n"
+        f"С кем: {user_name}\n"
+        f"Статус: {task.status}\n"
+        f"Заголовок: {task.title or '(нет)'}"
+        f"{result_str}"
+    )
+
+
+@tool(
     "get_overdue_tasks",
     "Get all overdue tasks across all users",
     {},
@@ -339,19 +414,19 @@ async def list_banned(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "send_summary_to_owner",
-    "Send a summary to the bot owner about current conversation",
-    {"summary": str},
+    "Send a summary to the bot owner. Pass your user_id from message metadata [id: XXX].",
+    {"user_id": int, "summary": str},
 )
 async def send_summary_to_owner(args: dict[str, Any]) -> dict[str, Any]:
     """Отправляет сводку owner'у."""
+    user_id = args.get("user_id")
     summary = args.get("summary")
 
-    if not summary:
-        return _error("summary обязателен")
+    if not user_id or not summary:
+        return _error("user_id и summary обязательны")
 
     from src.config import settings
 
-    user_id = _get_current_user_id()
     repo = get_users_repository()
     user = await repo.get_user(user_id)
     user_name = user.display_name if user else str(user_id)
@@ -371,12 +446,15 @@ async def send_summary_to_owner(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "get_my_tasks",
-    "Get tasks assigned to the current user",
-    {},
+    "Get tasks assigned to user. Pass user_id from message metadata [id: XXX].",
+    {"user_id": int},
 )
 async def get_my_tasks(args: dict[str, Any]) -> dict[str, Any]:
-    """Получает задачи текущего пользователя."""
-    user_id = _get_current_user_id()
+    """Получает задачи пользователя."""
+    user_id = args.get("user_id")
+    if not user_id:
+        return _error("user_id обязателен")
+
     repo = get_users_repository()
     tasks = await repo.get_user_tasks(user_id)
 
@@ -393,15 +471,18 @@ async def get_my_tasks(args: dict[str, Any]) -> dict[str, Any]:
 
 
 @tool(
-    "ban_current_user",
-    "Ban the current user for rule violations. Use after warnings.",
-    {"reason": str},
+    "ban_violator",
+    "Ban a user for rule violations. Use after warnings. Pass user_id from message metadata [id: XXX].",
+    {"user_id": int, "reason": str},
 )
-async def ban_current_user(args: dict[str, Any]) -> dict[str, Any]:
-    """Банит текущего пользователя."""
+async def ban_violator(args: dict[str, Any]) -> dict[str, Any]:
+    """Банит нарушителя."""
+    user_id = args.get("user_id")
     reason = args.get("reason", "нарушение правил")
 
-    user_id = _get_current_user_id()
+    if not user_id:
+        return _error("user_id обязателен (твой Telegram ID из промпта)")
+
     repo = get_users_repository()
 
     user = await repo.get_user(user_id)
@@ -426,17 +507,109 @@ async def ban_current_user(args: dict[str, Any]) -> dict[str, Any]:
 
 
 @tool(
+    "get_active_conversations",
+    "Get active conversation tasks delegated from owner. Pass user_id from message metadata [id: XXX].",
+    {"user_id": int},
+)
+async def get_active_conversations(args: dict[str, Any]) -> dict[str, Any]:
+    """Получает активные задачи согласования для пользователя."""
+    user_id = args.get("user_id")
+    if not user_id:
+        return _error("user_id обязателен")
+
+    repo = get_users_repository()
+    tasks = await repo.get_active_conversation_tasks(user_id)
+
+    if not tasks:
+        return _text("Нет активных задач согласования")
+
+    lines = ["Активные задачи согласования:"]
+    for task in tasks:
+        lines.append(
+            f"[{task.id}] {task.task_type}: {task.title or '(без заголовка)'} — {task.status}"
+        )
+
+    return _text("\n".join(lines))
+
+
+@tool(
+    "update_conversation",
+    "Update conversation task with result. Pass user_id from message metadata [id: XXX].",
+    {"user_id": int, "task_id": str, "status": str, "result": dict},
+)
+async def update_conversation(args: dict[str, Any]) -> dict[str, Any]:
+    """
+    Обновляет задачу согласования результатом.
+
+    status: in_progress, completed, cancelled
+    result: собранные данные (например, выбранное время для встречи)
+    """
+    user_id = args.get("user_id")
+    task_id = args.get("task_id")
+    status = args.get("status")
+    result = args.get("result")
+
+    if not user_id or not task_id:
+        return _error("user_id и task_id обязательны")
+
+    repo = get_users_repository()
+    task = await repo.get_conversation_task(task_id)
+
+    if not task:
+        return _error(f"Задача [{task_id}] не найдена")
+
+    # Проверяем что это задача для этого пользователя
+    if task.user_id != user_id:
+        return _error("Вы можете обновлять только свои задачи согласования")
+
+    # Обновляем
+    success = await repo.update_conversation_task(
+        task_id=task_id,
+        status=status,
+        result=result,
+    )
+
+    if not success:
+        return _error("Не удалось обновить задачу")
+
+    # Уведомляем owner'а о результате
+    from src.config import settings
+    user = await repo.get_user(user_id)
+    user_name = user.display_name if user else str(user_id)
+
+    import json
+    result_str = json.dumps(result, ensure_ascii=False) if result else "нет"
+
+    notification = (
+        f"Согласование [{task_id}] обновлено\n"
+        f"От: {user_name}\n"
+        f"Тип: {task.task_type}\n"
+        f"Статус: {status}\n"
+        f"Результат: {result_str}"
+    )
+
+    if _telegram_sender:
+        try:
+            await _telegram_sender(settings.tg_user_id, notification)
+        except Exception as e:
+            logger.error(f"Failed to notify owner: {e}")
+
+    return _text(f"Задача [{task_id}] обновлена, владелец уведомлён")
+
+
+@tool(
     "update_task_status",
-    "Update task status. Status: pending, accepted, completed",
-    {"task_id": str, "status": str},
+    "Update task status. Pass user_id from message metadata [id: XXX]. Status: pending, accepted, completed",
+    {"user_id": int, "task_id": str, "status": str},
 )
 async def update_task_status(args: dict[str, Any]) -> dict[str, Any]:
     """Обновляет статус задачи."""
+    user_id = args.get("user_id")
     task_id = args.get("task_id")
     status = args.get("status")
 
-    if not task_id or not status:
-        return _error("task_id и status обязательны")
+    if not user_id or not task_id or not status:
+        return _error("user_id, task_id и status обязательны")
 
     valid_statuses = ["pending", "accepted", "completed"]
     if status not in valid_statuses:
@@ -448,8 +621,7 @@ async def update_task_status(args: dict[str, Any]) -> dict[str, Any]:
     if not task:
         return _error(f"Задача [{task_id}] не найдена")
 
-    # Проверяем что это задача текущего пользователя
-    user_id = _get_current_user_id()
+    # Проверяем что это задача этого пользователя
     if task.assignee_id != user_id:
         return _error("Вы можете обновлять только свои задачи")
 
@@ -485,13 +657,19 @@ OWNER_TOOLS = [
     ban_user,
     unban_user,
     list_banned,
+    # Cross-session communication
+    start_conversation,
+    get_conversation_status,
 ]
 
 EXTERNAL_USER_TOOLS = [
     send_summary_to_owner,
     get_my_tasks,
     update_task_status,
-    ban_current_user,
+    ban_violator,
+    # Cross-session communication
+    get_active_conversations,
+    update_conversation,
 ]
 
 OWNER_TOOL_NAMES = [t.name for t in OWNER_TOOLS]

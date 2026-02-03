@@ -11,6 +11,8 @@ from claude_agent_sdk import create_sdk_mcp_server
 from src.tools.scheduler import SCHEDULER_TOOLS
 from src.memory.tools import MEMORY_TOOLS, MEMORY_TOOL_NAMES
 from src.mcp_manager.tools import MCP_MANAGER_TOOLS, MCP_MANAGER_TOOL_NAMES
+from src.plugin_manager.tools import PLUGIN_MANAGER_TOOLS, PLUGIN_MANAGER_TOOL_NAMES
+from src.skill_manager.tools import SKILL_MANAGER_TOOLS, SKILL_MANAGER_TOOL_NAMES
 from src.users.tools import (
     OWNER_TOOLS,
     EXTERNAL_USER_TOOLS,
@@ -28,6 +30,8 @@ ALL_TOOLS = [
     *SCHEDULER_TOOLS,
     *MEMORY_TOOLS,
     *MCP_MANAGER_TOOLS,
+    *PLUGIN_MANAGER_TOOLS,
+    *SKILL_MANAGER_TOOLS,
     *OWNER_TOOLS,
     *EXTERNAL_USER_TOOLS,
     *TELEGRAM_TOOLS,
@@ -48,10 +52,16 @@ OWNER_ALLOWED_TOOLS = [
     *MEMORY_TOOL_NAMES,
     # MCP Manager
     *MCP_MANAGER_TOOL_NAMES,
+    # Plugin Manager
+    *PLUGIN_MANAGER_TOOL_NAMES,
+    # Skill Manager
+    *SKILL_MANAGER_TOOL_NAMES,
     # User management
     *[f"mcp__jobs__{name}" for name in OWNER_TOOL_NAMES],
     # Telegram API
     *TELEGRAM_TOOL_NAMES,
+    # Skills (SDK native support via setting_sources=["project"])
+    "Skill",
 ]
 
 # External users — только свои задачи и сводки

@@ -66,6 +66,7 @@ class Settings(BaseSettings):
     # Paths
     data_dir: Path = Path("/data")
     workspace_dir: Path = Path("/workspace")
+    claude_dir: Path = Path("/home/jobs/.claude")  # Claude Code config dir
 
     @property
     def session_path(self) -> Path:
@@ -83,6 +84,11 @@ class Settings(BaseSettings):
     @property
     def uploads_dir(self) -> Path:
         return self.workspace_dir / "uploads"
+
+    @property
+    def skills_dir(self) -> Path:
+        """Директория со skills."""
+        return self.workspace_dir / "skills"
 
 
 settings = Settings()

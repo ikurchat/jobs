@@ -17,7 +17,7 @@ from loguru import logger
 
 from src.config import settings, set_owner_info
 from src.users import get_session_manager, get_users_repository
-from src.users.tools import set_current_user, set_telegram_sender
+from src.users.tools import set_telegram_sender
 from src.media import transcribe_audio, save_media
 
 MAX_TG_LENGTH = 4000
@@ -90,8 +90,9 @@ class TelegramHandlers:
                 logger.info(f"[{user_id}] Banned user, ignoring")
                 return
 
-        # Устанавливаем контекст для tools
-        set_current_user(user_id)
+        # Добавляем метаданные юзера к промпту
+        user_meta = self._format_user_meta(sender)
+        prompt = f"{user_meta}\n\n{prompt}"
 
         input_chat = await event.get_input_chat()
 
@@ -105,6 +106,8 @@ class TelegramHandlers:
         session_manager = get_session_manager()
         user_display_name = sender.first_name or sender.username or str(user_id)
         session = session_manager.get_session(user_id, user_display_name)
+
+        # Skills подхватываются автоматически через SDK (setting_sources=["project"])
 
         last_typing = asyncio.get_event_loop().time()
         has_sent_anything = False
@@ -182,6 +185,24 @@ class TelegramHandlers:
         except Exception:
             pass
 
+    def _format_user_meta(self, sender: Any) -> str:
+        """Форматирует метаданные пользователя для добавления к промпту."""
+        parts = [f"id: {sender.id}"]
+
+        if sender.username:
+            parts.append(f"@{sender.username}")
+
+        name = sender.first_name or ""
+        if sender.last_name:
+            name = f"{name} {sender.last_name}".strip()
+        if name:
+            parts.append(name)
+
+        if hasattr(sender, 'phone') and sender.phone:
+            parts.append(f"tel: {sender.phone}")
+
+        return f"[{' | '.join(parts)}]"
+
     def _format_tool(self, tool_name: str) -> str:
         """Форматирует название инструмента в читаемый вид."""
         # Убираем префиксы mcp__jobs__ и mcp__*__
@@ -231,7 +252,12 @@ class TelegramHandlers:
             "ban_user": "Баню пользователя...",
             "unban_user": "Разбаниваю...",
             "list_banned": "Список забаненных...",
-            "ban_current_user": "Баню нарушителя...",
+            "ban_violator": "Баню нарушителя...",
+            # Cross-session tools
+            "start_conversation": "Начинаю согласование...",
+            "get_conversation_status": "Проверяю статус...",
+            "get_active_conversations": "Активные задачи...",
+            "update_conversation": "Обновляю результат...",
             # Telegram tools
             "tg_send_message": "Отправляю сообщение...",
             "tg_send_media": "Отправляю медиа...",

@@ -41,6 +41,94 @@
 | `src/memory/` | MEMORY.md + vector search |
 | `src/tools/` | Scheduler + разделение по ролям |
 | `src/mcp_manager/` | Внешние MCP серверы |
+| `src/plugin_manager/` | Плагины из маркетплейса |
+| `src/skill_manager/` | Управление локальными skills |
+| `skills/` | Skills через SDK (монтируется в `.claude/skills/`) |
+
+## Skills (нативная поддержка SDK)
+
+Skills работают через `setting_sources=["project"]` в ClaudeAgentOptions.
+
+```
+skills/                           # На хосте
+└── schedule-meeting/
+    └── SKILL.md                  # С YAML frontmatter
+        │
+        ▼ docker-compose mount
+        │
+/workspace/.claude/skills/        # В контейнере
+└── schedule-meeting/
+    └── SKILL.md
+```
+
+**SDK автоматически:**
+1. Ищет skills в `{cwd}/.claude/skills/`
+2. Загружает frontmatter (metadata) в контекст
+3. Semantic match: user request ↔ `description`
+4. Инжектит SKILL.md body при активации
+
+**SKILL.md формат:**
+```yaml
+---
+name: schedule-meeting
+description: Use when user asks to "договорись о встрече", "назначь встречу"...
+tools: Read, Bash
+---
+
+# Algorithm
+1. resolve_user()
+2. start_conversation()
+...
+```
+
+**Cross-session:** Skills могут использовать `ConversationTask` для делегирования задач другим пользователям.
+
+**Управление через чат:**
+```
+— Создай skill для парсинга hh.ru
+— skill_create name="hh-parser" description="..." algorithm="..."
+
+— Покажи все skills
+— skill_list
+```
+
+**Tools:**
+| Tool | Описание |
+|------|----------|
+| `skill_create` | Создать новый skill |
+| `skill_list` | Список локальных skills |
+| `skill_show` | Показать содержимое |
+| `skill_edit` | Редактировать skill |
+| `skill_delete` | Удалить skill |
+
+Документация: `skills/CLAUDE.md`
+
+## Plugins (маркетплейс)
+
+Плагины — пакеты с skills, commands, hooks, agents и MCP серверами.
+
+**Управление через чат:**
+```
+— Найди плагины для code review
+— plugin_search query="code review"
+
+— Установи code-review
+— plugin_install name="code-review"
+```
+
+**Tools:**
+| Tool | Описание |
+|------|----------|
+| `plugin_search` | Поиск по маркетплейсу |
+| `plugin_install` | Установка плагина |
+| `plugin_list` | Список установленных |
+| `plugin_available` | Все доступные плагины |
+| `plugin_enable/disable` | Вкл/выкл без удаления |
+| `plugin_remove` | Полное удаление |
+
+**Хранение:**
+- Маркетплейс: `/data/.claude/plugins/marketplaces/`
+- Конфиг: `/data/plugins.json`
 
 ## Разделение доступа
 
@@ -74,6 +162,7 @@ get_users_repository()  # Пользователи и задачи
 get_storage()           # Файловая память
 get_index()             # Векторный поиск
 get_mcp_config()        # MCP серверы
+get_plugin_config()     # Плагины
 ```
 
 ## Запуск
@@ -91,7 +180,8 @@ docker-compose up
 │   ├── {owner_id}.session
 │   └── {user_id}.session
 ├── telethon.session    # Telegram сессия
-└── mcp_servers.json    # MCP конфиг
+├── mcp_servers.json    # MCP конфиг
+└── plugins.json        # Установленные плагины
 
 /workspace/
 ├── MEMORY.md           # Долгосрочная память

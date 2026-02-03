@@ -9,6 +9,7 @@ services:
       - ./data:/data              # Персистентные данные (сессия, БД)
       - ./data/.claude:/home/jobs/.claude  # Claude Code credentials
       - jobs-workspace:/workspace  # Рабочая директория Claude
+      - ./skills:/workspace/.claude/skills  # Skills для SDK
     restart: unless-stopped
     stdin_open: true              # Для интерактивного логина
     tty: true

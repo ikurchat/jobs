@@ -6,6 +6,17 @@ SessionManager — управление сессиями Claude для разн�
 - External users — ограниченный доступ с external tools
 """
 
+"""
+SessionManager — управление сессиями Claude для разных пользователей.
+
+Каждый пользователь получает свою изолированную сессию:
+- Owner (tg_user_id) — полный доступ с owner tools
+- External users — ограниченный доступ с external tools
+
+Skills подхватываются автоматически через setting_sources=["project"].
+SDK ищет их в {cwd}/.claude/skills/
+"""
+
 import os
 from pathlib import Path
 from typing import AsyncIterator
@@ -23,6 +34,7 @@ from loguru import logger
 from src.config import settings, get_owner_display_name, get_owner_link
 from src.tools import create_tools_server, OWNER_ALLOWED_TOOLS, EXTERNAL_ALLOWED_TOOLS
 from src.mcp_manager.config import get_mcp_config
+from src.plugin_manager.config import get_plugin_config
 
 
 class UserSession:
@@ -40,10 +52,12 @@ class UserSession:
         session_dir: Path,
         system_prompt: str,
         is_owner: bool = False,
+        base_prompt_builder: callable = None,
     ) -> None:
         self.telegram_id = telegram_id
         self.is_owner = is_owner
         self._system_prompt = system_prompt
+        self._base_prompt_builder = base_prompt_builder  # Для dynamic prompt с context
         self._session_file = session_dir / f"{telegram_id}.session"
         self._session_id: str | None = self._load_session_id()
         self._tools_server = create_tools_server()
@@ -57,13 +71,31 @@ class UserSession:
                 return session_id
         return None
 
+    async def _refresh_prompt_with_context(self) -> None:
+        """
+        Обновляет system_prompt с актуальным контекстом ConversationTask.
+
+        Вызывается перед каждым запросом для external users.
+        """
+        if self.is_owner or not self._base_prompt_builder:
+            return
+
+        from src.users.repository import get_users_repository
+        from src.users.prompts import format_conversation_context
+
+        repo = get_users_repository()
+        tasks = await repo.get_active_conversation_tasks(self.telegram_id)
+
+        conversation_context = format_conversation_context(tasks)
+        self._system_prompt = self._base_prompt_builder(conversation_context)
+
     def _save_session_id(self, session_id: str) -> None:
         """Сохраняет session_id в файл."""
         self._session_file.parent.mkdir(parents=True, exist_ok=True)
         self._session_file.write_text(session_id)
         logger.debug(f"Saved session [{self.telegram_id}]: {session_id[:8]}...")
 
-    def _build_options(self) -> ClaudeAgentOptions:
+    def _build_options(self, system_prompt_override: str | None = None) -> ClaudeAgentOptions:
         """Создаёт опции для клиента."""
         env = os.environ.copy()
         env["HTTP_PROXY"] = settings.http_proxy
@@ -87,6 +119,15 @@ class UserSession:
         # Owner имеет полный доступ, external users — ограниченный
         permission_mode = "bypassPermissions" if self.is_owner else "default"
 
+        # Используем override если передан (для skill injection)
+        prompt = system_prompt_override if system_prompt_override else self._system_prompt
+
+        # Плагины (только для owner)
+        plugins = []
+        if self.is_owner:
+            plugin_config = get_plugin_config()
+            plugins = plugin_config.to_sdk_format()
+
         options = ClaudeAgentOptions(
             model=settings.claude_model,
             cwd=Path(settings.workspace_dir),
@@ -94,7 +135,11 @@ class UserSession:
             env=env,
             mcp_servers=mcp_servers,
             allowed_tools=allowed_tools,
-            system_prompt=self._system_prompt,
+            system_prompt=prompt,
+            # Включаем filesystem-based configuration (skills, slash commands, CLAUDE.md)
+            setting_sources=["project"],
+            # Плагины из маркетплейса
+            plugins=plugins,
         )
 
         if self._session_id:
@@ -103,7 +148,14 @@ class UserSession:
         return options
 
     async def query(self, prompt: str) -> str:
-        """Отправляет запрос и возвращает ответ."""
+        """
+        Отправляет запрос и возвращает ответ.
+
+        Skills подхватываются автоматически через setting_sources=["project"].
+        SDK ищет их в {cwd}/.claude/skills/
+        """
+        await self._refresh_prompt_with_context()
+
         options = self._build_options()
         text_parts: list[str] = []
 
@@ -132,9 +184,14 @@ class UserSession:
         """
         Стримит ответ.
 
+        Skills подхватываются автоматически через setting_sources=["project"].
+        SDK ищет их в {cwd}/.claude/skills/
+
         Yields:
             (text, tool_name, is_final)
         """
+        await self._refresh_prompt_with_context()
+
         options = self._build_options()
         text_buffer: list[str] = []
 
@@ -185,13 +242,22 @@ class SessionManager:
         self._external_prompt_template: str | None = None
 
     def _get_owner_prompt(self) -> str:
-        """Загружает system prompt для owner'а."""
+        """
+        Загружает system prompt для owner'а.
+
+        Skills подхватываются автоматически через setting_sources=["project"].
+        """
         if self._owner_prompt is None:
             from src.users.prompts import OWNER_SYSTEM_PROMPT
             self._owner_prompt = OWNER_SYSTEM_PROMPT
         return self._owner_prompt
 
-    def _get_external_prompt(self, user_display_name: str) -> str:
+    def _get_external_prompt(
+        self,
+        telegram_id: int,
+        user_display_name: str,
+        conversation_context: str = "",
+    ) -> str:
         """Загружает system prompt для внешнего пользователя."""
         if self._external_prompt_template is None:
             from src.users.prompts import EXTERNAL_USER_PROMPT_TEMPLATE
@@ -205,9 +271,11 @@ class SessionManager:
             contact_info = "Прямой контакт недоступен, только через бота."
 
         return self._external_prompt_template.format(
+            telegram_id=telegram_id,
             username=user_display_name,
             owner_name=get_owner_display_name(),
             owner_contact_info=contact_info,
+            conversation_context=conversation_context,
         )
 
     def get_session(self, telegram_id: int, user_display_name: str | None = None) -> UserSession:
@@ -222,17 +290,22 @@ class SessionManager:
             return self._sessions[telegram_id]
 
         is_owner = telegram_id == settings.tg_user_id
+        base_prompt_builder = None
 
         if is_owner:
             system_prompt = self._get_owner_prompt()
         else:
-            system_prompt = self._get_external_prompt(user_display_name or str(telegram_id))
+            display_name = user_display_name or str(telegram_id)
+            system_prompt = self._get_external_prompt(telegram_id, display_name)
+            # Builder для динамического обновления с ConversationTask context
+            base_prompt_builder = lambda ctx, tid=telegram_id, dn=display_name: self._get_external_prompt(tid, dn, ctx)
 
         session = UserSession(
             telegram_id=telegram_id,
             session_dir=self._session_dir,
             system_prompt=system_prompt,
             is_owner=is_owner,
+            base_prompt_builder=base_prompt_builder,
         )
 
         self._sessions[telegram_id] = session
