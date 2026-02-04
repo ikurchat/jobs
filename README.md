@@ -48,6 +48,7 @@ docker-compose up
 | **Плагины** | Расширения из маркетплейса |
 | **Мульти-юзер** | Управление задачами других людей |
 | **Skills** | Сложные сценарии через SKILL.md |
+| **Браузер** | Персистентный Chromium с VNC |
 
 ---
 
@@ -127,6 +128,51 @@ Jobs → Тебе: "⚠️ Маша: макеты просрочены на 1 д
 ```
 
 700+ серверов: [registry.modelcontextprotocol.io](https://registry.modelcontextprotocol.io)
+
+---
+
+## Браузер
+
+Персистентный Chromium через @playwright/mcp.
+
+```
+— Открой hh.ru и найди вакансии python
+— [snapshot → click → type → snapshot]
+— Нашёл 47 вакансий, вот топ-10...
+
+— Залогинься в twitter
+— [navigate → snapshot → type login → click → ...]
+— ✅ Залогинен, куки сохранены
+```
+
+### Архитектура
+
+```
+┌─────────────────────────────────────────┐
+│           Docker: browser               │
+│                                         │
+│  Xvfb → Chromium → CDP (:9222)         │
+│           ↓           ↓                 │
+│        x11vnc    HAProxy (:9223)       │
+│           ↓                             │
+│      noVNC (:6080)                     │
+└─────────────────────────────────────────┘
+         ↓                    ↓
+    Jobs (@playwright/mcp)   Ты (noVNC)
+```
+
+- **Playwright MCP** — snapshot + ref workflow (accessibility tree)
+- **noVNC** — просмотр в браузере: http://localhost:6080
+- **Профиль** — куки, сессии, история сохраняются
+
+| Команда | Действие |
+|---------|----------|
+| `browser_navigate(url)` | Открыть страницу |
+| `browser_snapshot()` | Accessibility-дерево с ref-ами |
+| `browser_click(element, ref)` | Клик по ref |
+| `browser_type(element, ref, text)` | Ввод текста |
+| `browser_take_screenshot()` | Скриншот |
+| `browser_evaluate(script)` | Выполнить JS |
 
 ---
 
@@ -220,6 +266,10 @@ src/
 ├── plugin_manager/   # Плагины из маркетплейса
 └── skill_manager/    # Управление локальными skills
 
+browser/              # Docker-контейнер с Chromium
+├── Dockerfile
+└── start-*.sh        # Скрипты запуска
+
 skills/               # Skills для SDK
 └── schedule-meeting/ # Согласование встреч
     └── SKILL.md
@@ -262,6 +312,7 @@ skills/               # Skills для SDK
 - [x] Управление задачами
 - [x] Skills (SDK native)
 - [x] Cross-session communication
+- [x] Браузер (@playwright/mcp + CDP)
 - [ ] Яндекс Телемост интеграция
 - [ ] Веб-интерфейс
 - [ ] Групповые чаты

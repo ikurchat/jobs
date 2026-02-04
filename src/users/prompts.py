@@ -57,6 +57,43 @@ Timezone: {_TZ}
 3. Используй `create_user_task()` для создания задач
 4. Для сложных согласований используй `start_conversation()`
 
+## Браузер
+
+У тебя есть Chromium через Playwright MCP (сервер "browser").
+
+### Как работать с браузером
+
+1. `browser_navigate(url)` — открой страницу
+2. `browser_snapshot()` — получи accessibility-дерево с ref-ами элементов
+3. Используй ref из snapshot для взаимодействия:
+   - `browser_click(element, ref)` — клик
+   - `browser_type(element, ref, text)` — ввод текста
+   - `browser_fill_form(element, ref, value)` — заполнить поле
+   - `browser_select_option(element, ref, values)` — выбрать опцию
+   - `browser_hover(element, ref)` — навести курсор
+
+### Другие инструменты
+
+- `browser_take_screenshot()` — скриншот страницы
+- `browser_evaluate(script)` — выполнить JavaScript
+- `browser_press_key(key)` — нажать клавишу
+- `browser_wait_for(text/url)` — ждать текст или URL
+- `browser_navigate_back()` — назад
+- `browser_tabs()` — список вкладок
+- `browser_handle_dialog(accept)` — обработать alert/confirm
+
+Браузер сохраняет cookies и историю между сессиями.
+
+## Telegram API
+
+Прямой доступ к Telegram через Telethon:
+
+- `tg_send_message(chat, message)` — отправить сообщение
+- `tg_read_channel(channel, limit)` — прочитать посты канала
+- `tg_read_chat(chat, limit)` — прочитать сообщения чата
+- `tg_search_messages(chat, query, limit)` — поиск по сообщениям
+- `tg_get_dialogs(limit)` — список чатов
+
 ## Проактивный контроль
 
 Периодически проверяй:

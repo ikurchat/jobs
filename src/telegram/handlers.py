@@ -269,6 +269,25 @@ class TelegramHandlers:
             "tg_get_user_info": "Смотрю профиль...",
             "tg_get_dialogs": "Список чатов...",
             "tg_download_media": "Скачиваю медиа...",
+            # Browser tools (Playwright MCP)
+            "browser_navigate": "Открываю страницу...",
+            "browser_navigate_back": "Назад...",
+            "browser_snapshot": "Читаю страницу...",
+            "browser_click": "Кликаю...",
+            "browser_type": "Ввожу текст...",
+            "browser_fill_form": "Заполняю поле...",
+            "browser_select_option": "Выбираю...",
+            "browser_hover": "Навожу курсор...",
+            "browser_drag": "Перетаскиваю...",
+            "browser_press_key": "Нажимаю клавишу...",
+            "browser_take_screenshot": "Делаю скриншот...",
+            "browser_evaluate": "Выполняю JS...",
+            "browser_wait_for": "Жду...",
+            "browser_console_messages": "Читаю консоль...",
+            "browser_tabs": "Вкладки...",
+            "browser_handle_dialog": "Обрабатываю диалог...",
+            "browser_file_upload": "Загружаю файл...",
+            "browser_close": "Закрываю браузер...",
         }
 
         return tools_display.get(clean_name, "Работаю...")

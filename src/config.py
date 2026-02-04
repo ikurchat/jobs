@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     # Heartbeat
     heartbeat_interval_minutes: int = 30  # 0 = отключен
 
+    # Browser (CDP via HAProxy)
+    browser_cdp_url: str = "http://browser:9223"
+
     # Paths
     data_dir: Path = Path("/data")
     workspace_dir: Path = Path("/workspace")

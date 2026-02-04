@@ -9,11 +9,11 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Docker Container                              │
+│                    Docker: jobs                                  │
 │                                                                  │
 │  ┌─────────────────────┐                                        │
 │  │   Owner Session     │ ← Полный доступ                        │
-│  │   bypassPermissions │   Memory, Scheduler, MCP, Bash...      │
+│  │   bypassPermissions │   Memory, Scheduler, MCP, Browser...   │
 │  └─────────────────────┘                                        │
 │                                                                  │
 │  ┌─────────────────────┐                                        │
@@ -30,6 +30,20 @@
 │  /data/sessions/  — Claude session IDs                          │
 │  /workspace/      — рабочая директория owner'а                  │
 └─────────────────────────────────────────────────────────────────┘
+         │
+         │ CDP (Chrome DevTools Protocol)
+         ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                    Docker: browser                               │
+│                                                                  │
+│  Xvfb (:99) → Chromium → CDP (:9222)                            │
+│                  ↓                                               │
+│              x11vnc → noVNC (:6080)                              │
+│                                                                  │
+│  Volumes:                                                        │
+│  • browser-profile   — куки, сессии, история                    │
+│  • browser-downloads — скачанные файлы                          │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Ключевые модули
@@ -44,6 +58,40 @@
 | `src/plugin_manager/` | Плагины из маркетплейса |
 | `src/skill_manager/` | Управление локальными skills |
 | `skills/` | Skills через SDK (монтируется в `.claude/skills/`) |
+| `browser/` | Docker-контейнер с Chromium |
+
+## Browser (@playwright/mcp)
+
+Персистентный Chromium через Playwright MCP (snapshot + ref workflow).
+
+**Архитектура:**
+- **Chromium** — браузер в контейнере `browser` (Xvfb + x11vnc)
+- **HAProxy** — проксирует CDP (:9223 → :9222), перезаписывает Host header
+- **`playwright-cdp-wrapper`** — фетчит /json/version, подменяет hostname в WS URL
+- **@playwright/mcp** — MCP-сервер, accessibility snapshot + ref-ы элементов
+- **noVNC** — просмотр: http://localhost:6080
+
+**Workflow:**
+1. `browser_navigate(url)` — открыть страницу
+2. `browser_snapshot()` — получить accessibility-дерево с ref-ами
+3. Взаимодействие по ref: `browser_click(element, ref)`, `browser_type(element, ref, text)`
+
+**Tools:**
+| Tool | Описание |
+|------|----------|
+| `browser_navigate` | Открыть URL |
+| `browser_snapshot` | Accessibility-дерево с ref-ами |
+| `browser_click` | Клик по ref элемента |
+| `browser_type` | Ввод текста по ref |
+| `browser_fill_form` | Заполнить несколько полей |
+| `browser_select_option` | Выбрать опцию в dropdown |
+| `browser_hover` | Навести курсор |
+| `browser_press_key` | Нажать клавишу |
+| `browser_take_screenshot` | Скриншот |
+| `browser_evaluate` | Выполнить JavaScript |
+| `browser_wait_for` | Ждать текст/URL |
+| `browser_tabs` | Список вкладок |
+| `browser_handle_dialog` | Обработать alert/confirm |
 
 ## Skills (нативная поддержка SDK)
 
@@ -137,7 +185,9 @@ tools: Read, Bash
 | Bash, Read, Write | ✅ | ❌ |
 | Memory | ✅ | ❌ |
 | Scheduler | ✅ | ❌ |
+| Browser | ✅ | ❌ |
 | MCP Manager | ✅ | ❌ |
+| Telegram API | ✅ | ❌ |
 | send_to_user | ✅ | ❌ |
 | create_user_task | ✅ | ❌ |
 | send_summary_to_owner | ❌ | ✅ |
@@ -152,6 +202,7 @@ ANTHROPIC_API_KEY       — Claude API (опционально, есть OAuth)
 OPENAI_API_KEY          — Whisper транскрипция
 HTTP_PROXY              — Прокси для API
 HEARTBEAT_INTERVAL_MINUTES — Проверки (0 = выкл)
+BROWSER_CDP_URL         — CDP endpoint (default: http://browser:9223)
 ```
 
 ## Singletons
@@ -171,6 +222,10 @@ get_plugin_config()     # Плагины
 docker-compose up
 ```
 
+Два сервиса:
+- `jobs` — основной контейнер с ботом
+- `browser` — Chromium с CDP и noVNC
+
 ## Хранение
 
 ```
@@ -187,4 +242,9 @@ docker-compose up
 ├── MEMORY.md           # Долгосрочная память
 ├── memory/             # Дневные логи
 └── uploads/            # Файлы от пользователей
+
+Docker volumes:
+├── jobs-workspace      # Рабочая директория
+├── browser-profile     # Chromium профиль (куки, сессии)
+└── browser-downloads   # Скачанные файлы
 ```

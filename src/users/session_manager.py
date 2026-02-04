@@ -32,7 +32,6 @@ from claude_agent_sdk import (
 from loguru import logger
 
 from src.config import settings, get_owner_display_name, get_owner_link
-from src.tools import create_tools_server, OWNER_ALLOWED_TOOLS, EXTERNAL_ALLOWED_TOOLS
 from src.mcp_manager.config import get_mcp_config
 from src.plugin_manager.config import get_plugin_config
 
@@ -60,6 +59,8 @@ class UserSession:
         self._base_prompt_builder = base_prompt_builder  # Для dynamic prompt с context
         self._session_file = session_dir / f"{telegram_id}.session"
         self._session_id: str | None = self._load_session_id()
+        # Lazy import to avoid circular dependency
+        from src.tools import create_tools_server
         self._tools_server = create_tools_server()
 
     def _load_session_id(self) -> str | None:
@@ -107,13 +108,23 @@ class UserSession:
         # MCP серверы
         mcp_servers = {"jobs": self._tools_server}
 
-        # Owner получает внешние MCP серверы
+        # Owner получает внешние MCP серверы + browser
         if self.is_owner:
             mcp_config = get_mcp_config()
             external_servers = mcp_config.to_mcp_json()
             mcp_servers.update(external_servers)
 
+            # Browser MCP server (@playwright/mcp → existing Chromium via CDP)
+            # Wrapper fetches /json/version and rewrites WS URL hostname
+            mcp_servers["browser"] = {
+                "command": "playwright-cdp-wrapper",
+                "args": [settings.browser_cdp_url],
+                "env": {"NO_PROXY": "browser,localhost,127.0.0.1"},
+            }
+
         # Разные allowed_tools для owner и external users
+        # Lazy import to avoid circular dependency
+        from src.tools import OWNER_ALLOWED_TOOLS, EXTERNAL_ALLOWED_TOOLS
         allowed_tools = OWNER_ALLOWED_TOOLS if self.is_owner else EXTERNAL_ALLOWED_TOOLS
 
         # Owner имеет полный доступ, external users — ограниченный

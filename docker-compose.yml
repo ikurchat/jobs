@@ -5,6 +5,7 @@ services:
     environment:
       - TZ=${TZ:-Europe/Moscow}
       - HOME=/home/jobs
+      - BROWSER_CDP_URL=http://browser:9223
     volumes:
       - ./data:/data              # Персистентные данные (сессия, БД)
       - ./data/.claude:/home/jobs/.claude  # Claude Code credentials
@@ -13,6 +14,30 @@ services:
     restart: unless-stopped
     stdin_open: true              # Для интерактивного логина
     tty: true
+    depends_on:
+      browser:
+        condition: service_healthy
+
+  browser:
+    build: ./browser
+    environment:
+      - TZ=${TZ:-Europe/Moscow}
+      - RESOLUTION=1920x1080x24
+    volumes:
+      - browser-profile:/home/browser/.config/chromium  # Персистентный профиль
+      - browser-downloads:/home/browser/Downloads       # Скачанные файлы
+    ports:
+      - "6080:6080"               # noVNC web interface (для просмотра)
+      - "9223:9223"               # CDP proxy (для отладки)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9223/json"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 volumes:
   jobs-workspace:                 # Named volume для workspace
+  browser-profile:                # Профиль Chromium (куки, сессии, история)
+  browser-downloads:              # Скачанные файлы

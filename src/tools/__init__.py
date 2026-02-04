@@ -23,7 +23,7 @@ from src.telegram.tools import TELEGRAM_TOOLS, TELEGRAM_TOOL_NAMES
 
 
 # =============================================================================
-# All tools (регистрируются в MCP сервере)
+# All tools (регистрируются в SDK MCP сервере "jobs")
 # =============================================================================
 
 ALL_TOOLS = [
@@ -35,6 +35,32 @@ ALL_TOOLS = [
     *OWNER_TOOLS,
     *EXTERNAL_USER_TOOLS,
     *TELEGRAM_TOOLS,
+]
+
+
+# =============================================================================
+# Browser tools — отдельный MCP server "browser" (@playwright/mcp)
+# =============================================================================
+
+BROWSER_TOOL_NAMES = [
+    "mcp__browser__browser_navigate",
+    "mcp__browser__browser_navigate_back",
+    "mcp__browser__browser_snapshot",
+    "mcp__browser__browser_click",
+    "mcp__browser__browser_type",
+    "mcp__browser__browser_fill_form",
+    "mcp__browser__browser_select_option",
+    "mcp__browser__browser_hover",
+    "mcp__browser__browser_drag",
+    "mcp__browser__browser_press_key",
+    "mcp__browser__browser_take_screenshot",
+    "mcp__browser__browser_evaluate",
+    "mcp__browser__browser_wait_for",
+    "mcp__browser__browser_console_messages",
+    "mcp__browser__browser_tabs",
+    "mcp__browser__browser_handle_dialog",
+    "mcp__browser__browser_file_upload",
+    "mcp__browser__browser_close",
 ]
 
 
@@ -60,6 +86,8 @@ OWNER_ALLOWED_TOOLS = [
     *[f"mcp__jobs__{name}" for name in OWNER_TOOL_NAMES],
     # Telegram API
     *TELEGRAM_TOOL_NAMES,
+    # Browser (@playwright/mcp)
+    *BROWSER_TOOL_NAMES,
     # Skills (SDK native support via setting_sources=["project"])
     "Skill",
 ]

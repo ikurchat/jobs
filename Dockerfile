@@ -18,6 +18,11 @@ RUN npm install -g @anthropic-ai/claude-code
 # Создаём non-root пользователя (Claude Code не работает под root)
 RUN useradd -m -s /bin/bash jobs
 
+# Playwright MCP server (browser automation)
+RUN npm install -g @playwright/mcp
+COPY playwright-cdp-wrapper.sh /usr/local/bin/playwright-cdp-wrapper
+RUN chmod +x /usr/local/bin/playwright-cdp-wrapper
+
 # Python зависимости
 WORKDIR /app
 COPY pyproject.toml .
