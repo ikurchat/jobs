@@ -26,7 +26,6 @@ from src.mcp_manager.config import get_mcp_config
 from src.plugin_manager.config import get_plugin_config
 
 
-MAX_CONTEXT_MESSAGES = 10
 QUERY_TIMEOUT_SECONDS = 300  # 5 минут
 
 
@@ -34,9 +33,9 @@ class UserSession:
     """
     Сессия Claude для конкретного пользователя.
 
-    Хранит локальный буфер последних сообщений (_context),
-    который подкладывается в каждый prompt — ассистент видит
-    что он отправлял через tool calls даже если session resume не сработал.
+    _incoming — буфер сообщений, пришедших из других сессий
+    (например, уведомления об обновлении задач). Подкладываются
+    в prompt при следующем запросе и очищаются.
     """
 
     def __init__(
@@ -53,7 +52,8 @@ class UserSession:
         self._base_prompt_builder = base_prompt_builder
         self._session_file = session_dir / f"{telegram_id}.session"
         self._session_id: str | None = self._load_session_id()
-        self._context: list[tuple[str, str]] = []  # (role, text) — буфер контекста
+        self._incoming: list[str] = []
+        self._is_querying: bool = False
         # Lazy import to avoid circular dependency
         from src.tools import create_tools_server
         self._tools_server = create_tools_server()
@@ -87,22 +87,22 @@ class UserSession:
         self._session_file.write_text(session_id)
         logger.debug(f"Saved session [{self.telegram_id}]: {session_id[:8]}...")
 
-    def add_context(self, role: str, text: str) -> None:
-        """Добавляет сообщение в буфер контекста."""
-        self._context.append((role, text[:1000]))
-        if len(self._context) > MAX_CONTEXT_MESSAGES:
-            self._context = self._context[-MAX_CONTEXT_MESSAGES:]
+    def receive_incoming(self, text: str) -> None:
+        """Добавляет входящее сообщение от другой сессии."""
+        if not self._is_querying:
+            self._incoming.append(text[:2000])
 
-    def _format_context(self) -> str:
-        """Форматирует буфер контекста для вставки в prompt."""
-        if not self._context:
+    def _consume_incoming(self) -> str:
+        """Забирает входящие сообщения и очищает буфер."""
+        if not self._incoming:
             return ""
 
-        lines = ["[Предыдущие сообщения в этом чате:]"]
-        for role, text in self._context:
-            prefix = "Ты" if role == "assistant" else "Пользователь"
-            lines.append(f"{prefix}: {text}")
-        lines.append("[Конец контекста]\n")
+        lines = ["[Пока тебя не было, поступили сообщения:]"]
+        for msg in self._incoming:
+            lines.append(msg)
+        lines.append("[Конец входящих]\n")
+
+        self._incoming.clear()
         return "\n".join(lines)
 
     def _build_options(self, system_prompt_override: str | None = None) -> ClaudeAgentOptions:
@@ -162,13 +162,13 @@ class UserSession:
         """Отправляет запрос и возвращает ответ."""
         await self._refresh_prompt_with_context()
 
-        # Подкладываем контекст предыдущих сообщений
-        context = self._format_context()
-        full_prompt = f"{context}{prompt}" if context else prompt
+        incoming = self._consume_incoming()
+        full_prompt = f"{incoming}{prompt}" if incoming else prompt
 
         options = self._build_options()
         text_parts: list[str] = []
 
+        self._is_querying = True
         try:
             async with asyncio.timeout(QUERY_TIMEOUT_SECONDS):
                 async with ClaudeSDKClient(options=options) as client:
@@ -193,13 +193,10 @@ class UserSession:
             logger.error(f"Claude error [{self.telegram_id}]: {type(e).__name__}: {e}")
             return f"Ошибка: {e}"
 
-        result = "".join(text_parts) or "Нет ответа"
+        finally:
+            self._is_querying = False
 
-        # Сохраняем обмен в контекст
-        self.add_context("user", prompt)
-        self.add_context("assistant", result[:500])
-
-        return result
+        return "".join(text_parts) or "Нет ответа"
 
     async def query_stream(self, prompt: str) -> AsyncIterator[tuple[str | None, str | None, bool]]:
         """
@@ -210,13 +207,13 @@ class UserSession:
         """
         await self._refresh_prompt_with_context()
 
-        # Подкладываем контекст предыдущих сообщений
-        context = self._format_context()
-        full_prompt = f"{context}{prompt}" if context else prompt
+        incoming = self._consume_incoming()
+        full_prompt = f"{incoming}{prompt}" if incoming else prompt
 
         options = self._build_options()
         text_buffer: list[str] = []
 
+        self._is_querying = True
         try:
             async with asyncio.timeout(QUERY_TIMEOUT_SECONDS):
                 async with ClaudeSDKClient(options=options) as client:
@@ -251,15 +248,13 @@ class UserSession:
             yield (f"Ошибка: {e}", None, True)
             return
 
-        # Сохраняем обмен в контекст
-        response = "".join(text_buffer)
-        self.add_context("user", prompt)
-        self.add_context("assistant", response[:500])
+        finally:
+            self._is_querying = False
 
     def reset(self) -> None:
         """Сбрасывает сессию."""
         self._session_id = None
-        self._context.clear()
+        self._incoming.clear()
         if self._session_file.exists():
             self._session_file.unlink()
         logger.info(f"Session reset [{self.telegram_id}]")

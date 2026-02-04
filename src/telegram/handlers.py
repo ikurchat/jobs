@@ -49,6 +49,13 @@ class TelegramHandlers:
         """Отправляет сообщение пользователю (для user tools)."""
         await self._client.send_message(user_id, text)
 
+        # Буферизуем в сессию получателя, если отправитель — другая сессия.
+        # Определяем sender: это сессия, которая сейчас _is_querying=True.
+        session_manager = get_session_manager()
+        recipient = session_manager._sessions.get(user_id)
+        if recipient and not recipient._is_querying:
+            recipient.receive_incoming(text)
+
     async def _on_message(self, event: events.NewMessage.Event) -> None:
         """Обрабатывает входящее сообщение (только private chats)."""
         # Пропускаем каналы и группы — ими занимаются trigger subscriptions
