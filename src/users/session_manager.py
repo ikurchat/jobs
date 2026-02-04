@@ -217,7 +217,10 @@ class UserSession:
                                 text_buffer.append(block.text)
                                 yield (block.text, None, False)
                             elif isinstance(block, ToolUseBlock):
-                                yield (None, block.name, False)
+                                tool_display = block.name
+                                if block.name == "Skill" and block.input.get("skill"):
+                                    tool_display = f"Skill:{block.input['skill']}"
+                                yield (None, tool_display, False)
 
                     elif isinstance(message, ResultMessage):
                         if message.session_id:

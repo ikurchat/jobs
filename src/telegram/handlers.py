@@ -205,6 +205,12 @@ class TelegramHandlers:
 
     def _format_tool(self, tool_name: str) -> str:
         """Форматирует название инструмента в читаемый вид."""
+        # Skill:name → "⚡ Skill Name..."
+        if tool_name.startswith("Skill:"):
+            skill_name = tool_name.split(":", 1)[1]
+            display = skill_name.replace("-", " ").replace("_", " ").title()
+            return f"Skill: {display}..."
+
         # Убираем префиксы mcp__jobs__ и mcp__*__
         clean_name = tool_name
         if clean_name.startswith("mcp__"):
