@@ -1,6 +1,6 @@
 ---
 name: schedule-meeting
-description: Use this skill when user asks to "schedule a meeting", "договорись о встрече", "назначь встречу", "согласуй время встречи", "meet with someone", or mentions scheduling time with another person.
+description: Use this skill when user wants to schedule, arrange, or coordinate any online meeting, call, or video chat with another person. Triggers (imperative): "договорись о встрече", "назначь встречу", "согласуй встречу", "согласуй звонок", "согласуй созвон", "созвонись с", "договорись о созвоне", "предупреди о звонке", "назначь созвон", "организуй видеовстречу". Triggers (first person): "согласую встречу", "хочу встречу с", "нужна встреча с", "нужен созвон с", "запланируй встречу". Triggers (short): "встреча с @", "созвон с @", "звонок с @", "schedule a meeting", "arrange a call", "set up a call", "meet with someone". Use this skill for ANY message involving coordinating a call or meeting time with another person — even if the time is already specified, even with typos.
 tools: mcp__jobs__resolve_user, mcp__jobs__create_task, mcp__jobs__send_to_user, mcp__jobs__schedule_task
 ---
 
@@ -38,7 +38,7 @@ create_task(
   user="@masha",
   title="Встреча {дата}",
   kind="meeting",
-  context={"date": "{дата}", "slots": "{от}-{до}", "purpose": "{цель}"},
+  context={"skill": "schedule-meeting", "date": "{дата}", "slots": "{от}-{до}", "purpose": "{цель}"},
   message="Привет! Я личный ассистент {owner_username}. Он предлагает созвониться {дата} с {от} до {до} по МСК. Подскажи, в какое время тебе удобнее?"
 )
 ```
@@ -67,7 +67,7 @@ create_task(
 ```
 schedule_task(
   title="Встреча с @masha",
-  prompt="Встреча с @masha через 5 минут. Используй скилл create-telemost чтобы создать ссылку Яндекс Телемост, затем отправь ссылку владельцу и @masha.",
+  prompt="Встреча с @masha через 5 минут. Используй скилл create-telemost чтобы создать ссылку Яндекс Телемост, затем отправь ссылку всем участникам через send_to_user(). Владельцу НЕ отправляй — он увидит ссылку в сводке по задаче.",
   time="{согласованное_время - 5 минут}"
 )
 ```

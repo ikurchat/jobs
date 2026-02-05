@@ -114,7 +114,7 @@ async def main() -> None:
     await trigger_manager.start_all()
 
     # Регистрируем handlers (интерактивный Telegram — отдельно)
-    handlers = TelegramHandlers(client)
+    handlers = TelegramHandlers(client, executor)
     handlers.register()
 
     logger.info("Bot is running. Send me a message!")

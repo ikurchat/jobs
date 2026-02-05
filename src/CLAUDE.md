@@ -40,10 +40,12 @@ Response → Telegram
 
 ### SessionManager (users/session_manager.py)
 ```python
-get_session(telegram_id: int, user_display_name: str | None = None) → UserSession
+get_session(telegram_id, user_display_name) → UserSession
 get_owner_session() → UserSession
-reset_session(telegram_id: int)
-reset_all()  # После изменения MCP конфига
+create_task_session(task_id) → UserSession         # Persistent session для задачи
+get_task_session(task_id, session_id) → UserSession | None  # Восстановление из БД
+reset_session(telegram_id)
+reset_all()
 ```
 
 ### UsersRepository (users/repository.py)
@@ -51,7 +53,9 @@ reset_all()  # После изменения MCP конфига
 upsert_user(...)
 find_user(query)  # Fuzzy search
 create_task(...)
-get_overdue_tasks()
+update_task(task_id, status, result, next_step)
+update_task_session(task_id, session_id)  # Persistent task session ID
+list_tasks(assignee_id, status, kind, overdue_only, include_done)
 ```
 
 ### Settings (config.py)
@@ -73,6 +77,18 @@ OWNER_ALLOWED_TOOLS = [
 EXTERNAL_ALLOWED_TOOLS = [
     send_summary_to_owner, get_my_tasks, update_task_status
 ]
+```
+
+## Task model (users/models.py)
+
+```python
+@dataclass
+class Task:
+    id, title, status, kind, context, result
+    assignee_id, created_by, deadline
+    schedule_at, schedule_repeat       # Для kind="scheduled"
+    next_step: str | None              # Текущий шаг (heartbeat)
+    session_id: str | None             # Claude SDK session ID (persistent)
 ```
 
 ## Промпты

@@ -69,6 +69,10 @@ class Task:
     schedule_at: datetime | None = None      # Следующее время выполнения
     schedule_repeat: int | None = None       # Интервал повтора (секунды), None = одноразово
 
+    # Persistent task session
+    next_step: str | None = None             # Текущий шаг для heartbeat
+    session_id: str | None = None            # Claude SDK session ID для persistent сессии
+
     @property
     def is_overdue(self) -> bool:
         """Просрочена ли задача."""
@@ -98,4 +102,6 @@ class Task:
             result=json.loads(row["result"]) if row["result"] else None,
             schedule_at=datetime.fromisoformat(row["schedule_at"]) if row.get("schedule_at") else None,
             schedule_repeat=row.get("schedule_repeat"),
+            next_step=row.get("next_step"),
+            session_id=row.get("session_id"),
         )

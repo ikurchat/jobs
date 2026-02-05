@@ -48,13 +48,15 @@ class UserSession:
         system_prompt: str,
         is_owner: bool = False,
         allowed_tools: list[str] | None = None,
+        session_key: str | None = None,
     ) -> None:
         self.telegram_id = telegram_id
         self.is_owner = is_owner
         self._system_prompt = system_prompt
         self._allowed_tools_override = allowed_tools
-        self._session_file = session_dir / f"{telegram_id}.session"
-        self._incoming_file = session_dir / f"{telegram_id}.incoming"
+        key = session_key or str(telegram_id)
+        self._session_file = session_dir / f"{key}.session"
+        self._incoming_file = session_dir / f"{key}.incoming"
         self._session_id: str | None = self._load_session_id()
         self._incoming: list[str] = self._load_incoming()
         self._is_querying: bool = False
@@ -266,7 +268,7 @@ class UserSession:
                 self._client = None
                 await self._destroy_client(client)
 
-        return "".join(text_parts) or "Нет ответа"
+        return text_parts[-1] if text_parts else "Нет ответа"
 
     async def query_stream(self, prompt: str) -> AsyncIterator[tuple[str | None, str | None, bool]]:
         """
@@ -385,6 +387,7 @@ class SessionManager:
         self._session_dir = session_dir
         self._session_dir.mkdir(parents=True, exist_ok=True)
         self._sessions: dict[int, UserSession] = {}
+        self._task_sessions: dict[str, UserSession] = {}
         self._ephemeral_counter: int = 0
 
         self._owner_prompt: str | None = None
@@ -468,6 +471,30 @@ class SessionManager:
             is_owner=False,
             allowed_tools=HEARTBEAT_ALLOWED_TOOLS,
         )
+
+    def create_task_session(self, task_id: str) -> UserSession:
+        """Создаёт persistent сессию для задачи с owner tools."""
+        session = UserSession(
+            telegram_id=0,
+            session_dir=self._session_dir,
+            system_prompt=self._get_owner_prompt(),
+            is_owner=True,
+            session_key=f"task_{task_id}",
+        )
+        self._task_sessions[task_id] = session
+        logger.info(f"Created task session for [{task_id}]")
+        return session
+
+    def get_task_session(self, task_id: str, session_id: str | None = None) -> UserSession | None:
+        """Получает или восстанавливает task session."""
+        if task_id in self._task_sessions:
+            return self._task_sessions[task_id]
+        if session_id:
+            session = self.create_task_session(task_id)
+            session._session_id = session_id
+            session._save_session_id(session_id)
+            return session
+        return None
 
     async def reset_session(self, telegram_id: int) -> None:
         if telegram_id in self._sessions:

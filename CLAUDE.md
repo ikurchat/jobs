@@ -21,6 +21,11 @@
 │  │   default perms     │   Только: get_my_tasks,                │
 │  └─────────────────────┘   send_summary_to_owner, update_task   │
 │                                                                  │
+│  ┌─────────────────────┐                                        │
+│  │   Task Sessions     │ ← Persistent per-task                   │
+│  │   bypassPermissions │   Помнят контекст задачи (skill, ход)  │
+│  └─────────────────────┘   Resume через session_id в БД         │
+│                                                                  │
 │  ┌─────────────────────────────────────────────────────────┐   │
 │  │          TriggerManager                                   │   │
 │  │  builtin: scheduler, heartbeat                            │   │
@@ -31,7 +36,8 @@
 │            ↓                                                     │
 │  ┌─────────────────────────────────────────────────────────┐   │
 │  │              SQLite (db.sqlite)                          │   │
-│  │  • external_users  • tasks  • trigger_subscriptions       │   │
+│  │  • external_users  • tasks (+ next_step, session_id)      │
+│  • trigger_subscriptions                                   │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                                                                  │
 │  /data/sessions/  — Claude session IDs                          │
@@ -258,11 +264,20 @@ docker-compose up
 
 ## Session Context
 
-`UserSession` хранит буфер последних 10 сообщений (`_context`).
-Контекст подкладывается в начало каждого prompt — ассистент видит
-предыдущий обмен даже если session resume не сработал.
-
+`UserSession` хранит буфер входящих сообщений (`_incoming`).
+Входящие подмешиваются как follow-up во время активного query.
 Таймаут на Claude SDK: 5 минут (`QUERY_TIMEOUT_SECONDS`).
+
+### Task Sessions
+
+Задачи со `skill` в context получают **persistent session** (session_id в БД).
+Follow-up от external users обрабатывается в том же контексте — сессия помнит
+историю переписки, скилл и весь ход задачи.
+
+- `create_task_session(task_id)` — создаёт сессию с owner tools
+- `get_task_session(task_id, session_id)` — восстанавливает из файла
+- Heartbeat resume'ит все task sessions параллельно (`asyncio.gather`)
+- `next_step` — текущий шаг задачи для heartbeat промпта
 
 ## Хранение
 
@@ -271,7 +286,8 @@ docker-compose up
 ├── db.sqlite           # SQLite БД (users, tasks, trigger_subscriptions)
 ├── sessions/           # Claude session IDs
 │   ├── {owner_id}.session
-│   └── {user_id}.session
+│   ├── {user_id}.session
+│   └── task_{task_id}.session  # Persistent task sessions
 ├── telethon.session    # Telegram сессия
 ├── mcp_servers.json    # MCP конфиг
 └── plugins.json        # Установленные плагины

@@ -16,6 +16,8 @@ RUN apt-get update && apt-get install -y \
     procps \
     curl \
     haproxy \
+    pulseaudio \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Создаём пользователя
@@ -30,6 +32,9 @@ RUN mkdir -p /home/browser/.config/chromium \
     /tmp/.X11-unix \
     && chown -R browser:browser /home/browser
 
+# Директория для аудио-записей
+RUN mkdir -p /recordings && chown browser:browser /recordings
+
 # Supervisor config
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
@@ -38,7 +43,8 @@ COPY haproxy.cfg /etc/haproxy/haproxy.cfg
 
 # Скрипты запуска
 COPY start-*.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/start-*.sh
+COPY cleanup-recordings.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/start-*.sh /usr/local/bin/cleanup-recordings.sh
 
 # Порты
 # 9223 - CDP proxy (socat)

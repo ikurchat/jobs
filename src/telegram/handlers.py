@@ -17,7 +17,8 @@ from loguru import logger
 
 from src.config import settings, set_owner_info
 from src.users import get_session_manager, get_users_repository
-from src.users.tools import set_telegram_sender
+from src.users.tools import set_telegram_sender, set_context_sender, set_buffer_sender, set_task_executor
+from src.triggers.executor import TriggerExecutor
 from src.media import transcribe_audio, save_media, MAX_MEDIA_SIZE
 
 MAX_TG_LENGTH = 4000
@@ -27,11 +28,15 @@ TYPING_REFRESH_INTERVAL = 3.0
 class TelegramHandlers:
     """Обработчики сообщений Telegram."""
 
-    def __init__(self, client: TelegramClient) -> None:
+    def __init__(self, client: TelegramClient, executor: TriggerExecutor | None = None) -> None:
         self._client = client
 
-        # Настраиваем sender для user tools
+        # Настраиваем sender'ы для user tools
         set_telegram_sender(self._send_message)
+        set_context_sender(self._inject_to_context)
+        set_buffer_sender(self._buffer_to_context)
+        if executor:
+            set_task_executor(executor.execute)
 
     def register(self) -> None:
         """Регистрирует обработчики событий."""
@@ -62,6 +67,24 @@ class TelegramHandlers:
                 logger.info("Triggering autonomous query for owner")
                 asyncio.create_task(self._process_incoming(user_id))
 
+    async def _inject_to_context(self, user_id: int, text: str) -> None:
+        """Инжектит сообщение в контекст сессии + триггерит autonomous query."""
+        session_manager = get_session_manager()
+        recipient = session_manager.get_session(user_id)
+        recipient.receive_incoming(text)
+        logger.info(f"Injected to context [{user_id}], buffer: {len(recipient._incoming)}")
+
+        if user_id == settings.tg_user_id:
+            if not recipient._is_querying:
+                asyncio.create_task(self._process_incoming(user_id))
+
+    async def _buffer_to_context(self, user_id: int, text: str) -> None:
+        """Тихая буферизация в контекст без autonomous query trigger."""
+        session_manager = get_session_manager()
+        recipient = session_manager.get_session(user_id)
+        recipient.receive_incoming(text)
+        logger.info(f"Buffered to context [{user_id}], buffer: {len(recipient._incoming)}")
+
     async def _process_incoming(self, user_id: int) -> None:
         """
         Автономный query для обработки входящих сообщений.
@@ -91,8 +114,10 @@ class TelegramHandlers:
             incoming_text = "\n".join(["[Входящие сообщения:]"] + messages + ["[Конец входящих]"])
             prompt = (
                 f"{incoming_text}\n\n"
-                "[Входящее уведомление. Проверь контекст и выполни необходимые действия "
-                "автоматически — schedule_task, send_to_user и т.д. Не жди подтверждения от owner'а.]"
+                "[Входящее уведомление от другой сессии. "
+                "Обработай информацию и кратко сообщи owner'у результат. "
+                "Выполни необходимые действия автоматически — schedule_task, send_to_user и т.д. "
+                "Не жди подтверждения от owner'а. НЕ дублируй текст уведомления дословно.]"
             )
 
             response = await session.query(prompt)

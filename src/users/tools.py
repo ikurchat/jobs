@@ -8,6 +8,7 @@ MCP Tools — инструменты для работы с пользовате
 User ID передаётся в метаданных каждого сообщения: [id: 123 | @username | Name]
 """
 
+import asyncio
 import json
 from datetime import datetime
 from typing import Any, Callable, Awaitable
@@ -21,11 +22,38 @@ from .repository import get_users_repository
 # Telegram sender (устанавливается один раз при старте)
 _telegram_sender: Callable[[int, str], Awaitable[None]] | None = None
 
+# Context sender — инжектит в контекст сессии БЕЗ отправки в Telegram + триггерит autonomous query
+_context_sender: Callable[[int, str], Awaitable[None]] | None = None
+
+# Buffer sender — тихая буферизация в контекст БЕЗ autonomous query trigger
+_buffer_sender: Callable[[int, str], Awaitable[None]] | None = None
+
+# Task executor — запуск background task через TriggerExecutor
+_task_executor: Callable[..., Awaitable[str | None]] | None = None
+
 
 def set_telegram_sender(sender: Callable[[int, str], Awaitable[None]]) -> None:
     """Устанавливает функцию отправки сообщений в Telegram."""
     global _telegram_sender
     _telegram_sender = sender
+
+
+def set_context_sender(sender: Callable[[int, str], Awaitable[None]]) -> None:
+    """Устанавливает функцию инжекта в контекст + autonomous trigger."""
+    global _context_sender
+    _context_sender = sender
+
+
+def set_buffer_sender(sender: Callable[[int, str], Awaitable[None]]) -> None:
+    """Устанавливает функцию тихой буферизации (без autonomous trigger)."""
+    global _buffer_sender
+    _buffer_sender = sender
+
+
+def set_task_executor(executor: Callable[..., Awaitable[str | None]]) -> None:
+    """Устанавливает TriggerExecutor.execute для запуска background tasks."""
+    global _task_executor
+    _task_executor = executor
 
 
 # =============================================================================
@@ -87,7 +115,7 @@ async def create_task(args: dict[str, Any]) -> dict[str, Any]:
         await _telegram_sender(user.telegram_id, notification)
 
     deadline_info = f" (до {deadline.strftime('%d.%m.%Y %H:%M')})" if deadline else ""
-    return _text(f"Задача [{task.id}] создана для {user.display_name}{deadline_info}")
+    return _text(f"💎 Создана [{task.id}] для {user.display_name}{deadline_info}")
 
 
 @tool(
@@ -383,18 +411,45 @@ async def update_task(args: dict[str, Any]) -> dict[str, Any]:
     user = await repo.get_user(user_id)
     user_name = user.display_name if user else str(user_id)
 
-    parts = [f"{user_name} обновил задачу [{task_id}]"]
-    if status:
-        parts.append(f"Статус: {status}")
-    if result:
-        parts.append(f"Результат: {json.dumps(result, ensure_ascii=False)}")
+    skill = task.context.get("skill") if task.context else None
 
-    notification = "\n".join(parts)
+    if skill:
+        async def _run_task_followup() -> None:
+            try:
+                from src.users.session_manager import get_session_manager
+                sm = get_session_manager()
 
-    if _telegram_sender:
-        await _telegram_sender(settings.tg_user_id, notification)
+                # Получаем или создаём persistent task session
+                session = sm.get_task_session(task_id, task.session_id)
+                if session is None:
+                    session = sm.create_task_session(task_id)
 
-    return _text(f"Задача [{task_id}] обновлена, владелец уведомлён")
+                prompt = _build_task_update_prompt(task, user_name, status, result)
+                content = await session.query(prompt)
+
+                # Сохраняем session_id в БД (если новый)
+                if session._session_id and session._session_id != task.session_id:
+                    await repo.update_task_session(task_id, session._session_id)
+
+                # Уведомляем owner'а если нужно
+                if content and _telegram_sender:
+                    from src.config import settings as _s
+                    await _telegram_sender(_s.tg_user_id, f"💎 Обновлена [{task_id}]:\n{content[:500]}")
+            except Exception as e:
+                logger.error(f"Task followup [{task_id}] failed: {e}")
+
+        asyncio.create_task(_run_task_followup())
+        logger.info(f"Launched persistent task session for [{task_id}] with skill={skill}")
+    elif _context_sender:
+        # Fallback: inject в контекст owner'а + autonomous query
+        parts = [f"{user_name} обновил задачу [{task_id}]"]
+        if status:
+            parts.append(f"Статус: {status}")
+        if result:
+            parts.append(f"Результат: {json.dumps(result, ensure_ascii=False)}")
+        await _context_sender(settings.tg_user_id, "\n".join(parts))
+
+    return _text(f"💎 Обновлена [{task_id}], владелец уведомлён")
 
 
 @tool(
@@ -418,12 +473,12 @@ async def send_summary_to_owner(args: dict[str, Any]) -> dict[str, Any]:
 
     message = f"Сводка от {user_name}:\n\n{summary}"
 
-    if _telegram_sender:
-        await _telegram_sender(settings.tg_user_id, message)
-        logger.info(f"Summary sent to owner from {user_name}")
+    if _context_sender:
+        await _context_sender(settings.tg_user_id, message)
+        logger.info(f"Summary sent to owner context from {user_name}")
         return _text("Сводка отправлена владельцу")
     else:
-        return _error("Telegram sender не настроен")
+        return _error("Context sender не настроен")
 
 
 @tool(
@@ -463,6 +518,29 @@ async def ban_violator(args: dict[str, Any]) -> dict[str, Any]:
         )
 
     return _text(f"Вы забанены: {reason}")
+
+
+# =============================================================================
+# Helpers — task follow-up
+# =============================================================================
+
+
+def _build_task_update_prompt(task: "Task", user_name: str, status: str | None, result: dict | None) -> str:
+    """Формирует промпт для persistent task session при обновлении задачи."""
+    parts = [f"Задача [{task.id}] ({task.kind}) обновлена пользователем {user_name}."]
+    parts.append(f"Тема: {task.title}")
+    if status:
+        parts.append(f"Новый статус: {status}")
+    if result:
+        parts.append(f"Результат: {json.dumps(result, ensure_ascii=False)}")
+    if task.context:
+        parts.append(f"Контекст задачи: {json.dumps(task.context, ensure_ascii=False)}")
+    parts.append("")
+    parts.append(
+        f"Используй скилл `{task.context.get('skill')}` для обработки этого результата. "
+        f"Выполни все необходимые follow-up действия автоматически."
+    )
+    return "\n".join(parts)
 
 
 # =============================================================================

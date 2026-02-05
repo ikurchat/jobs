@@ -93,6 +93,16 @@ class UsersRepository:
         except sqlite3.OperationalError:
             pass  # column already exists
 
+        # Миграция: persistent task sessions
+        try:
+            await self._db.execute("ALTER TABLE tasks ADD COLUMN next_step TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            await self._db.execute("ALTER TABLE tasks ADD COLUMN session_id TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
         # Миграция из старых таблиц (user_tasks → tasks)
         await self._migrate_old_tables()
 
@@ -622,6 +632,7 @@ class UsersRepository:
         task_id: str,
         status: str | None = None,
         result: dict | None = None,
+        next_step: str | None = None,
     ) -> bool:
         """Обновляет задачу."""
         import json
@@ -639,11 +650,26 @@ class UsersRepository:
             updates.append("result = ?")
             params.append(json.dumps(result, ensure_ascii=False))
 
+        if next_step is not None:
+            updates.append("next_step = ?")
+            params.append(next_step)
+
         params.append(task_id)
 
         cursor = await db.execute(
             f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?",
             params,
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+    async def update_task_session(self, task_id: str, session_id: str) -> bool:
+        """Сохраняет session_id для persistent task session."""
+        db = await self._get_db()
+        now = datetime.now().isoformat()
+        cursor = await db.execute(
+            "UPDATE tasks SET session_id = ?, updated_at = ? WHERE id = ?",
+            (session_id, now, task_id),
         )
         await db.commit()
         return cursor.rowcount > 0
