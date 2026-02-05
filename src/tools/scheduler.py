@@ -177,7 +177,7 @@ class SchedulerRunner:
                     source="scheduler",
                     prompt=prompt,
                     context={"task_id": task.id},
-                    preview_message=f"Выполняю задачу:\n{prompt}",
+                    preview_message=f"🧨 Выполняю задачу [{task.id}]:\n{prompt}",
                     result_prefix=f"Результат [{task.id}]:",
                 )
                 await self._executor.execute(event)
