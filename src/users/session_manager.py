@@ -227,6 +227,7 @@ class UserSession:
             try:
                 async with asyncio.timeout(QUERY_TIMEOUT_SECONDS):
                     await client.query(full_prompt)
+                    interrupted = False
 
                     async for message in client.receive_response():
                         if isinstance(message, AssistantMessage):
@@ -237,6 +238,11 @@ class UserSession:
                             if message.session_id:
                                 self._save_session_id(message.session_id)
 
+                        if not interrupted and self._incoming:
+                            await client.interrupt()
+                            interrupted = True
+                            logger.debug(f"Interrupted response [{self.telegram_id}]")
+
                     # Follow-up для входящих, накопившихся во время запроса
                     while self._incoming:
                         incoming_buf = self._consume_incoming()
@@ -245,6 +251,7 @@ class UserSession:
                             "Выполни необходимые действия автоматически.]"
                         )
                         await client.query(follow_up)
+                        interrupted = False
 
                         async for message in client.receive_response():
                             if isinstance(message, AssistantMessage):
@@ -254,6 +261,11 @@ class UserSession:
                             elif isinstance(message, ResultMessage):
                                 if message.session_id:
                                     self._save_session_id(message.session_id)
+
+                            if not interrupted and self._incoming:
+                                await client.interrupt()
+                                interrupted = True
+                                logger.debug(f"Interrupted follow-up [{self.telegram_id}]")
 
             except TimeoutError:
                 logger.error(f"Query timeout [{self.telegram_id}]")
@@ -298,6 +310,7 @@ class UserSession:
         try:
             async with asyncio.timeout(QUERY_TIMEOUT_SECONDS):
                 await client.query(full_prompt)
+                interrupted = False
 
                 async for message in client.receive_response():
                     if isinstance(message, AssistantMessage):
@@ -315,6 +328,11 @@ class UserSession:
                         if message.session_id:
                             self._save_session_id(message.session_id)
 
+                    if not interrupted and self._incoming:
+                        await client.interrupt()
+                        interrupted = True
+                        logger.debug(f"Interrupted response [{self.telegram_id}]")
+
                 # Follow-up для входящих, накопившихся во время запроса
                 while self._incoming:
                     incoming_buf = self._consume_incoming()
@@ -324,6 +342,7 @@ class UserSession:
                     )
                     logger.debug(f"Follow-up query [{self.telegram_id}]")
                     await client.query(follow_up)
+                    interrupted = False
 
                     async for message in client.receive_response():
                         if isinstance(message, AssistantMessage):
@@ -340,6 +359,11 @@ class UserSession:
                         elif isinstance(message, ResultMessage):
                             if message.session_id:
                                 self._save_session_id(message.session_id)
+
+                        if not interrupted and self._incoming:
+                            await client.interrupt()
+                            interrupted = True
+                            logger.debug(f"Interrupted follow-up [{self.telegram_id}]")
 
                 yield ("".join(text_buffer), None, True)
 
