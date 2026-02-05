@@ -44,29 +44,58 @@ class TelegramHandlers:
 
     async def _send_message(self, user_id: int, text: str) -> None:
         """Отправляет сообщение пользователю (для user tools)."""
+        logger.info(f"_send_message: user_id={user_id}, text={text[:60]}...")
         await self._client.send_message(user_id, text)
 
-        # Всегда буферизуем — подхватится при следующем query через _consume_incoming.
-        # Для idle owner — дополнительно запускаем автономный query.
         session_manager = get_session_manager()
-        recipient = session_manager._sessions.get(user_id)
-        if not recipient:
-            return
 
-        logger.debug(f"Buffered message for [{user_id}]: {text[:80]}...")
+        # Всегда создаём/получаем сессию получателя (get_session идемпотентен)
+        recipient = session_manager.get_session(user_id)
         recipient.receive_incoming(text)
+        logger.info(f"Buffered for [{user_id}], buffer size: {len(recipient._incoming)}")
 
-        if recipient.is_owner and not recipient._is_querying:
-            logger.info(f"Autonomous query for owner triggered")
-            asyncio.create_task(self._process_incoming(user_id))
+        # Если получатель — owner и он не в активном запросе, запускаем автономный query
+        if user_id == settings.tg_user_id:
+            is_querying = recipient._is_querying
+            logger.info(f"Owner is recipient, is_querying={is_querying}")
+            if not is_querying:
+                logger.info("Triggering autonomous query for owner")
+                asyncio.create_task(self._process_incoming(user_id))
 
     async def _process_incoming(self, user_id: int) -> None:
-        """Автономный query — буфер подхватится через _consume_incoming в session.query()."""
+        """
+        Автономный query для обработки входящих сообщений.
+
+        Защита от race condition:
+        - Атомарно забираем буфер ДО query
+        - Включаем сообщения явно в prompt
+        - session.query() вызовет _consume_incoming(), но буфер уже пуст
+        """
+        logger.info(f"_process_incoming started for [{user_id}]")
         try:
             session_manager = get_session_manager()
             session = session_manager.get_session(user_id)
 
-            response = await session.query("[Входящее уведомление]")
+            # Атомарно забираем буфер — защита от race condition
+            if not session._incoming:
+                logger.warning(f"_process_incoming: buffer empty for [{user_id}]")
+                return
+
+            # Копируем и очищаем буфер ДО query (включая файл)
+            messages = session._incoming.copy()
+            session._incoming.clear()
+            session._clear_incoming_file()
+            logger.info(f"_process_incoming: captured {len(messages)} messages")
+
+            # Формируем prompt с сообщениями явно
+            incoming_text = "\n".join(["[Входящие сообщения:]"] + messages + ["[Конец входящих]"])
+            prompt = (
+                f"{incoming_text}\n\n"
+                "[Входящее уведомление. Проверь контекст и выполни необходимые действия "
+                "автоматически — schedule_task, send_to_user и т.д. Не жди подтверждения от owner'а.]"
+            )
+
+            response = await session.query(prompt)
 
             if response and response != "Нет ответа":
                 logger.info(f"Owner autonomous response: {response[:80]}...")
