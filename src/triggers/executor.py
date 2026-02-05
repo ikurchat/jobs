@@ -3,9 +3,10 @@ TriggerExecutor — единая точка выполнения TriggerEvent.
 
 Принимает событие, отправляет preview, запрашивает агента,
 проверяет silent_marker, доставляет результат owner'у.
-"""
 
-import asyncio
+Каждое выполнение получает одноразовую сессию —
+параллельные задачи не блокируют друг друга и не прерывают owner.
+"""
 
 from loguru import logger
 from telethon import TelegramClient
@@ -24,33 +25,32 @@ class TriggerExecutor:
     def __init__(self, client: TelegramClient, session_manager: SessionManager) -> None:
         self._client = client
         self._session_manager = session_manager
-        self._lock = asyncio.Lock()
 
     async def execute(self, event: TriggerEvent) -> str | None:
         """
-        Выполняет событие триггера (последовательно, через lock).
+        Выполняет событие триггера в одноразовой сессии.
 
         1. Отправляет preview_message owner'у (если есть)
-        2. Запрашивает агента через owner session
+        2. Запрашивает агента через ephemeral background session
         3. Проверяет silent_marker — если есть, не доставляет
         4. Добавляет result_prefix, truncate, отправляет owner'у
 
         Returns:
             Ответ агента или None (если silent).
         """
-        async with self._lock:
-            return await self._execute_inner(event)
-
-    async def _execute_inner(self, event: TriggerEvent) -> str | None:
         logger.debug(f"Executing trigger event: {event.source}")
 
         # Preview
         if event.preview_message and event.notify_owner:
             await self.send_to_owner(event.preview_message)
 
-        # Query agent
-        session = self._session_manager.get_owner_session()
-        content = await session.query(event.prompt)
+        # Одноразовая сессия с owner tools
+        session = self._session_manager.create_background_session()
+        try:
+            content = await session.query(event.prompt)
+        finally:
+            await session.destroy()
+
         content = content.strip()
 
         # Silent marker check
