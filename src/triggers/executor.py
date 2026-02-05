@@ -40,9 +40,9 @@ class TriggerExecutor:
         """
         logger.debug(f"Executing trigger event: {event.source}")
 
-        # Preview
+        # Preview (без буферизации — это просто уведомление)
         if event.preview_message and event.notify_owner:
-            await self.send_to_owner(event.preview_message)
+            await self.send_to_owner(event.preview_message, buffer=False)
 
         # Одноразовая сессия с owner tools
         session = self._session_manager.create_background_session()
@@ -78,6 +78,17 @@ class TriggerExecutor:
 
         return content
 
-    async def send_to_owner(self, text: str) -> None:
-        """Отправляет сообщение owner'у."""
+    async def send_to_owner(self, text: str, buffer: bool = True) -> None:
+        """
+        Отправляет сообщение owner'у.
+
+        Args:
+            text: текст сообщения
+            buffer: буферизовать в owner session (для сохранения контекста)
+        """
         await self._client.send_message(settings.tg_user_id, text)
+
+        # Буферизуем в owner session чтобы сохранить контекст
+        if buffer:
+            owner_session = self._session_manager.get_session(settings.tg_user_id)
+            owner_session.receive_incoming(f"[Background task output]\n{text}")
