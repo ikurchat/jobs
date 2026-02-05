@@ -45,15 +45,20 @@ class UserSession:
         system_prompt: str,
         is_owner: bool = False,
         base_prompt_builder: callable = None,
+        allowed_tools: list[str] | None = None,
     ) -> None:
         self.telegram_id = telegram_id
         self.is_owner = is_owner
         self._system_prompt = system_prompt
         self._base_prompt_builder = base_prompt_builder
+        self._allowed_tools_override = allowed_tools
         self._session_file = session_dir / f"{telegram_id}.session"
         self._session_id: str | None = self._load_session_id()
         self._incoming: list[str] = []
         self._is_querying: bool = False
+        self._interrupted: bool = False
+        self._client: ClaudeSDKClient | None = None
+        self._query_lock: asyncio.Lock = asyncio.Lock()
         # Lazy import to avoid circular dependency
         from src.tools import create_tools_server
         self._tools_server = create_tools_server()
@@ -89,8 +94,7 @@ class UserSession:
 
     def receive_incoming(self, text: str) -> None:
         """Добавляет входящее сообщение от другой сессии."""
-        if not self._is_querying:
-            self._incoming.append(text[:2000])
+        self._incoming.append(text[:2000])
 
     def _consume_incoming(self) -> str:
         """Забирает входящие сообщения и очищает буфер."""
@@ -104,6 +108,32 @@ class UserSession:
 
         self._incoming.clear()
         return "\n".join(lines)
+
+    async def _ensure_client(self) -> ClaudeSDKClient:
+        """Возвращает живой клиент или создаёт новый."""
+        if self._client is None:
+            options = self._build_options()
+            self._client = ClaudeSDKClient(options=options)
+            await self._client.connect()
+            logger.debug(f"Created persistent client [{self.telegram_id}]")
+        return self._client
+
+    async def _reset_client(self) -> None:
+        """Закрывает клиент при ошибке."""
+        if self._client is not None:
+            try:
+                await self._client.disconnect()
+            except Exception:
+                pass
+            self._client = None
+            logger.debug(f"Reset client [{self.telegram_id}]")
+
+    async def _interrupt_if_querying(self) -> None:
+        """Прерывает текущий query если он выполняется."""
+        if self._is_querying and self._client is not None:
+            logger.info(f"Interrupting active query [{self.telegram_id}]")
+            self._interrupted = True
+            await self._client.interrupt()
 
     def _build_options(self, system_prompt_override: str | None = None) -> ClaudeAgentOptions:
         """Создаёт опции для клиента."""
@@ -130,8 +160,11 @@ class UserSession:
                 "env": {"NO_PROXY": "browser,localhost,127.0.0.1"},
             }
 
-        from src.tools import OWNER_ALLOWED_TOOLS, EXTERNAL_ALLOWED_TOOLS
-        allowed_tools = OWNER_ALLOWED_TOOLS if self.is_owner else EXTERNAL_ALLOWED_TOOLS
+        if self._allowed_tools_override is not None:
+            allowed_tools = self._allowed_tools_override
+        else:
+            from src.tools import OWNER_ALLOWED_TOOLS, EXTERNAL_ALLOWED_TOOLS
+            allowed_tools = OWNER_ALLOWED_TOOLS if self.is_owner else EXTERNAL_ALLOWED_TOOLS
 
         permission_mode = "bypassPermissions" if self.is_owner else "default"
         prompt = system_prompt_override if system_prompt_override else self._system_prompt
@@ -158,6 +191,26 @@ class UserSession:
 
         return options
 
+    async def _process_response(self, client: ClaudeSDKClient, text_parts: list[str]) -> None:
+        """Обрабатывает response от клиента, собирая текст и сохраняя session_id."""
+        async for message in client.receive_response():
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        text_parts.append(block.text)
+            elif isinstance(message, ResultMessage):
+                if message.session_id:
+                    self._session_id = message.session_id
+                    self._save_session_id(message.session_id)
+
+    async def _drain_incoming(self, client: ClaudeSDKClient, text_parts: list[str]) -> None:
+        """Если в буфере есть входящие — отправляет follow-up query."""
+        while self._incoming:
+            incoming = self._consume_incoming()
+            follow_up = f"{incoming}[Продолжай с учётом новых сообщений]"
+            await client.query(follow_up)
+            await self._process_response(client, text_parts)
+
     async def query(self, prompt: str) -> str:
         """Отправляет запрос и возвращает ответ."""
         await self._refresh_prompt_with_context()
@@ -165,36 +218,39 @@ class UserSession:
         incoming = self._consume_incoming()
         full_prompt = f"{incoming}{prompt}" if incoming else prompt
 
-        options = self._build_options()
         text_parts: list[str] = []
 
-        self._is_querying = True
-        try:
-            async with asyncio.timeout(QUERY_TIMEOUT_SECONDS):
-                async with ClaudeSDKClient(options=options) as client:
+        if self._query_lock.locked():
+            logger.info(f"query() blocked by active query [{self.telegram_id}], interrupting")
+            await self._interrupt_if_querying()
+
+        async with self._query_lock:
+            logger.debug(f"query() acquired lock [{self.telegram_id}]")
+            self._is_querying = True
+            self._interrupted = False
+            try:
+                async with asyncio.timeout(QUERY_TIMEOUT_SECONDS):
+                    client = await self._ensure_client()
                     await client.query(full_prompt)
+                    await self._process_response(client, text_parts)
+                    if not self._interrupted:
+                        await self._drain_incoming(client, text_parts)
+                    else:
+                        logger.debug(f"query() skipping drain — interrupted [{self.telegram_id}]")
 
-                    async for message in client.receive_response():
-                        if isinstance(message, AssistantMessage):
-                            for block in message.content:
-                                if isinstance(block, TextBlock):
-                                    text_parts.append(block.text)
+            except TimeoutError:
+                logger.error(f"Claude timeout [{self.telegram_id}]: {QUERY_TIMEOUT_SECONDS}s")
+                await self._reset_client()
+                return "Ошибка: таймаут запроса"
 
-                        elif isinstance(message, ResultMessage):
-                            if message.session_id:
-                                self._session_id = message.session_id
-                                self._save_session_id(message.session_id)
+            except Exception as e:
+                logger.error(f"Claude error [{self.telegram_id}]: {type(e).__name__}: {e}")
+                await self._reset_client()
+                return f"Ошибка: {e}"
 
-        except TimeoutError:
-            logger.error(f"Claude timeout [{self.telegram_id}]: {QUERY_TIMEOUT_SECONDS}s")
-            return "Ошибка: таймаут запроса"
-
-        except Exception as e:
-            logger.error(f"Claude error [{self.telegram_id}]: {type(e).__name__}: {e}")
-            return f"Ошибка: {e}"
-
-        finally:
-            self._is_querying = False
+            finally:
+                self._is_querying = False
+                logger.debug(f"query() released lock [{self.telegram_id}]")
 
         return "".join(text_parts) or "Нет ответа"
 
@@ -210,14 +266,49 @@ class UserSession:
         incoming = self._consume_incoming()
         full_prompt = f"{incoming}{prompt}" if incoming else prompt
 
-        options = self._build_options()
         text_buffer: list[str] = []
 
+        if self._query_lock.locked():
+            logger.info(f"query_stream() blocked by active query [{self.telegram_id}], interrupting")
+            await self._interrupt_if_querying()
+
+        await self._query_lock.acquire()
+        logger.debug(f"query_stream() acquired lock [{self.telegram_id}]")
         self._is_querying = True
+        self._interrupted = False
         try:
             async with asyncio.timeout(QUERY_TIMEOUT_SECONDS):
-                async with ClaudeSDKClient(options=options) as client:
-                    await client.query(full_prompt)
+                client = await self._ensure_client()
+                await client.query(full_prompt)
+
+                async for message in client.receive_response():
+                    if isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if isinstance(block, TextBlock):
+                                text_buffer.append(block.text)
+                                yield (block.text, None, False)
+                            elif isinstance(block, ToolUseBlock):
+                                tool_display = block.name
+                                if block.name == "Skill" and block.input.get("skill"):
+                                    tool_display = f"Skill:{block.input['skill']}"
+                                yield (None, tool_display, False)
+
+                    elif isinstance(message, ResultMessage):
+                        if message.session_id:
+                            self._session_id = message.session_id
+                            self._save_session_id(message.session_id)
+
+                if self._interrupted:
+                    logger.debug(f"query_stream() interrupted, skipping follow-ups [{self.telegram_id}]")
+                    yield ("", None, True)
+                    return
+
+                # Follow-up для входящих из буфера
+                while self._incoming:
+                    incoming_buf = self._consume_incoming()
+                    follow_up = f"{incoming_buf}[Продолжай с учётом новых сообщений]"
+                    logger.debug(f"query_stream() follow-up query [{self.telegram_id}]")
+                    await client.query(follow_up)
 
                     async for message in client.receive_response():
                         if isinstance(message, AssistantMessage):
@@ -236,25 +327,31 @@ class UserSession:
                                 self._session_id = message.session_id
                                 self._save_session_id(message.session_id)
 
-                            yield ("".join(text_buffer), None, True)
+                # Final yield после всех follow-ups
+                yield ("".join(text_buffer), None, True)
 
         except TimeoutError:
             logger.error(f"Claude timeout [{self.telegram_id}]: {QUERY_TIMEOUT_SECONDS}s")
+            await self._reset_client()
             yield ("Ошибка: таймаут запроса", None, True)
             return
 
         except Exception as e:
             logger.error(f"Claude error [{self.telegram_id}]: {type(e).__name__}: {e}")
+            await self._reset_client()
             yield (f"Ошибка: {e}", None, True)
             return
 
         finally:
             self._is_querying = False
+            self._query_lock.release()
+            logger.debug(f"query_stream() released lock [{self.telegram_id}]")
 
     def reset(self) -> None:
         """Сбрасывает сессию."""
         self._session_id = None
         self._incoming.clear()
+        self._client = None
         if self._session_file.exists():
             self._session_file.unlink()
         logger.info(f"Session reset [{self.telegram_id}]")
@@ -331,13 +428,35 @@ class SessionManager:
     def get_owner_session(self) -> UserSession:
         return self.get_session(settings.tg_user_id)
 
+    def get_heartbeat_session(self) -> UserSession:
+        """Возвращает отдельную сессию для heartbeat (не прерывает owner)."""
+        key = -1  # sentinel key
+        if key in self._sessions:
+            return self._sessions[key]
+
+        from src.users.prompts import HEARTBEAT_SYSTEM_PROMPT
+        from src.tools import HEARTBEAT_ALLOWED_TOOLS
+
+        session = UserSession(
+            telegram_id=key,
+            session_dir=self._session_dir,
+            system_prompt=HEARTBEAT_SYSTEM_PROMPT,
+            is_owner=False,
+            allowed_tools=HEARTBEAT_ALLOWED_TOOLS,
+        )
+        self._sessions[key] = session
+        logger.info("Created heartbeat session")
+        return session
+
     async def reset_session(self, telegram_id: int) -> None:
         if telegram_id in self._sessions:
+            await self._sessions[telegram_id]._reset_client()
             self._sessions[telegram_id].reset()
             del self._sessions[telegram_id]
 
     async def reset_all(self) -> None:
         for session in self._sessions.values():
+            await session._reset_client()
             session.reset()
         self._sessions.clear()
         logger.info("All sessions reset")

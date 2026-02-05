@@ -22,6 +22,7 @@ from src.users.prompts import HEARTBEAT_PROMPT
 if TYPE_CHECKING:
     from telethon import TelegramClient
     from src.triggers.executor import TriggerExecutor
+    from src.users.session_manager import SessionManager
 
 
 # Маркер что всё ок, не нужно писать пользователю
@@ -30,14 +31,17 @@ HEARTBEAT_OK_MARKER = "HEARTBEAT_OK"
 # Интервал по умолчанию (минуты)
 DEFAULT_INTERVAL_MINUTES = 30
 
+MAX_MESSAGE_LENGTH = 4000
+
 
 class HeartbeatRunner:
     """
     Периодический heartbeat для проактивных уведомлений.
 
-    Каждые interval минут:
+    Использует отдельную сессию (не owner), чтобы не прерывать
+    активный диалог. Каждые interval минут:
     1. Проверяет просроченные задачи пользователей
-    2. Отправляет TriggerEvent через executor
+    2. Запрашивает агента через heartbeat session
     3. Если ответ содержит HEARTBEAT_OK — тишина
     """
 
@@ -45,10 +49,12 @@ class HeartbeatRunner:
         self,
         executor: TriggerExecutor,
         client: TelegramClient,
+        session_manager: SessionManager,
         interval_minutes: int = DEFAULT_INTERVAL_MINUTES,
     ) -> None:
         self._executor = executor
         self._client = client
+        self._session_manager = session_manager
         self._interval = interval_minutes * 60  # в секунды
         self._running = False
         self._task: asyncio.Task | None = None
@@ -87,9 +93,7 @@ class HeartbeatRunner:
             await asyncio.sleep(self._interval)
 
     async def _check(self) -> None:
-        """Выполняет проверку."""
-        from src.triggers.models import TriggerEvent
-
+        """Выполняет проверку через отдельную heartbeat session."""
         logger.debug("Heartbeat check started")
 
         # Проверяем просроченные задачи пользователей
@@ -98,13 +102,24 @@ class HeartbeatRunner:
         # Формируем промпт с информацией о задачах
         prompt = await self._build_heartbeat_prompt()
 
-        event = TriggerEvent(
-            source="heartbeat",
-            prompt=prompt,
-            silent_marker=HEARTBEAT_OK_MARKER,
-            result_prefix="💡",
-        )
-        await self._executor.execute(event)
+        session = self._session_manager.get_heartbeat_session()
+        content = await session.query(prompt)
+        content = content.strip()
+
+        if HEARTBEAT_OK_MARKER in content:
+            logger.debug(f"Heartbeat: silent ({HEARTBEAT_OK_MARKER})")
+            return
+
+        content = content.replace(HEARTBEAT_OK_MARKER, "").strip()
+        if not content:
+            return
+
+        message = f"\U0001f4a1\n{content}"
+        if len(message) > MAX_MESSAGE_LENGTH:
+            message = message[:MAX_MESSAGE_LENGTH] + "..."
+
+        await self._client.send_message(settings.tg_user_id, message)
+        logger.info(f"Heartbeat notification sent: {content[:80]}...")
 
     async def _check_user_tasks(self) -> None:
         """Проверяет просроченные задачи и напоминает пользователям."""

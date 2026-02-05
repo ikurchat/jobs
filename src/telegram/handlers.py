@@ -13,7 +13,6 @@ from typing import Any
 from telethon import TelegramClient, events
 from telethon.tl.functions.messages import SetTypingRequest
 from telethon.tl.types import SendMessageTypingAction, SendMessageCancelAction
-from telegraph import Telegraph
 from loguru import logger
 
 from src.config import settings, set_owner_info
@@ -30,8 +29,6 @@ class TelegramHandlers:
 
     def __init__(self, client: TelegramClient) -> None:
         self._client = client
-        self._telegraph = Telegraph()
-        self._telegraph_ready = False
 
         # Настраиваем sender для user tools
         set_telegram_sender(self._send_message)
@@ -49,29 +46,33 @@ class TelegramHandlers:
         """Отправляет сообщение пользователю (для user tools)."""
         await self._client.send_message(user_id, text)
 
-        # Cross-session: если получатель — другая сессия,
-        # запускаем автономный query чтобы ассистент мог отреагировать.
-        # Если сессия занята — буферизуем для следующего prompt.
+        # Всегда буферизуем — подхватится при следующем query через _consume_incoming.
+        # Для idle owner — дополнительно запускаем автономный query.
         session_manager = get_session_manager()
         recipient = session_manager._sessions.get(user_id)
-        if recipient and not recipient._is_querying:
-            asyncio.create_task(self._process_incoming(user_id, text))
-        elif recipient:
-            recipient.receive_incoming(text)
+        if not recipient:
+            return
 
-    async def _process_incoming(self, user_id: int, text: str) -> None:
-        """Автономная обработка входящего сообщения от другой сессии."""
+        logger.debug(f"Buffered message for [{user_id}]: {text[:80]}...")
+        recipient.receive_incoming(text)
+
+        if recipient.is_owner and not recipient._is_querying:
+            logger.info(f"Autonomous query for owner triggered")
+            asyncio.create_task(self._process_incoming(user_id))
+
+    async def _process_incoming(self, user_id: int) -> None:
+        """Автономный query — буфер подхватится через _consume_incoming в session.query()."""
         try:
             session_manager = get_session_manager()
             session = session_manager.get_session(user_id)
 
-            now = datetime.now(tz=settings.get_timezone())
-            time_meta = now.strftime("%d.%m.%Y %H:%M")
-            prompt = f"[{time_meta}] [Входящее уведомление]\n\n{text}"
+            response = await session.query("[Входящее уведомление]")
 
-            response = await session.query(prompt)
             if response and response != "Нет ответа":
-                await self._client.send_message(user_id, self._prepare_response(text, response))
+                logger.info(f"Owner autonomous response: {response[:80]}...")
+                await self._client.send_message(user_id, response[:MAX_TG_LENGTH])
+            else:
+                logger.info("Owner autonomous query: no actionable response")
         except Exception as e:
             logger.error(f"Incoming processing error [{user_id}]: {e}")
 
@@ -178,7 +179,7 @@ class TelegramHandlers:
                         if tool_msg:
                             await self._safe_delete(tool_msg)
                             tool_msg = None
-                        await event.reply(self._prepare_response(prompt, text_clean))
+                        await event.reply(text_clean)
                         has_sent_anything = True
                         # Восстанавливаем typing после отправки
                         await self._set_typing(input_chat, typing=True)
@@ -191,7 +192,7 @@ class TelegramHandlers:
                         if tool_msg:
                             await self._safe_delete(tool_msg)
                             tool_msg = None
-                        await event.reply(self._prepare_response(prompt, final_text))
+                        await event.reply(final_text)
 
         except Exception as e:
             logger.error(f"Error: {e}")
@@ -389,28 +390,3 @@ class TelegramHandlers:
 
         return text, media_context
 
-    def _prepare_response(self, prompt: str, content: str) -> str:
-        """Подготавливает ответ (Telegraph для длинных)."""
-        if not content:
-            return "Нет ответа"
-
-        if len(content) <= MAX_TG_LENGTH:
-            return content
-
-        url = self._publish_telegraph(prompt, content)
-        return url
-
-    def _publish_telegraph(self, title: str, content: str) -> str:
-        """Публикует в Telegraph."""
-        if not self._telegraph_ready:
-            self._telegraph.create_account(short_name="JobsBot")
-            self._telegraph_ready = True
-
-        short_title = title[:50] + "..." if len(title) > 50 else title
-        safe = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-        page = self._telegraph.create_page(
-            title=short_title,
-            html_content=f"<pre>{safe}</pre>",
-        )
-        return page["url"]

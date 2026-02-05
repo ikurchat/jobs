@@ -100,6 +100,7 @@ async def main() -> None:
         heartbeat = HeartbeatRunner(
             executor=executor,
             client=client,
+            session_manager=session_manager,
             interval_minutes=settings.heartbeat_interval_minutes,
         )
         trigger_manager.register_builtin("heartbeat", heartbeat)

@@ -101,6 +101,13 @@ EXTERNAL_ALLOWED_TOOLS = [
     *[f"mcp__jobs__{name}" for name in EXTERNAL_USER_TOOL_NAMES],
 ]
 
+# Heartbeat — только задачи + память
+HEARTBEAT_ALLOWED_TOOLS = [
+    "mcp__jobs__list_tasks",
+    "mcp__jobs__cancel_task",
+    *MEMORY_TOOL_NAMES,
+]
+
 # Legacy: общий список (для обратной совместимости)
 TOOL_NAMES = OWNER_ALLOWED_TOOLS
 
