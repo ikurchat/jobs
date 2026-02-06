@@ -154,6 +154,19 @@ class TelegramHandlers:
             await event.reply("Сессия сброшена.")
             return
 
+        # /stop — прервать текущий запрос (сессия сохраняется)
+        if message.text and message.text.strip().lower() == "/stop":
+            if not is_owner:
+                return
+            session_manager = get_session_manager()
+            session = session_manager.get_session(user_id)
+            if session._is_querying and session._client:
+                await session._client.interrupt()
+                await event.reply("Остановлено.")
+            else:
+                await event.reply("Нечего останавливать.")
+            return
+
         # /usage — показать usage аккаунта (только owner)
         if message.text and message.text.strip().lower() == "/usage":
             if not is_owner:
