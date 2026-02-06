@@ -548,7 +548,7 @@ async def browser_proxy(args: dict[str, Any]) -> dict[str, Any]:
     payload = xmlrpc.client.dumps(("chromium",), "supervisor.stopProcess")
     headers = {"Content-Type": "text/xml"}
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(trust_env=False) as session:
         # Stop
         async with session.post(SUPERVISORD_URL, data=payload, headers=headers) as resp:
             await resp.text()
