@@ -544,23 +544,20 @@ async def browser_proxy(args: dict[str, Any]) -> dict[str, Any]:
     BROWSER_CONTROL_FILE.write_text("1" if enabled else "0")
     logger.info(f"Browser proxy set to {'ON' if enabled else 'OFF'}")
 
-    # Рестартим Chromium через supervisord XML-RPC
-    payload = xmlrpc.client.dumps(("chromium",), "supervisor.stopProcess")
+    # Рестартим tinyproxy (не chromium!) — CDP-соединение сохраняется
     headers = {"Content-Type": "text/xml"}
 
     async with aiohttp.ClientSession(trust_env=False) as session:
-        # Stop
+        payload = xmlrpc.client.dumps(("tinyproxy",), "supervisor.stopProcess")
         async with session.post(SUPERVISORD_URL, data=payload, headers=headers) as resp:
             await resp.text()
 
-        # Start
-        payload = xmlrpc.client.dumps(("chromium",), "supervisor.startProcess")
+        payload = xmlrpc.client.dumps(("tinyproxy",), "supervisor.startProcess")
         async with session.post(SUPERVISORD_URL, data=payload, headers=headers) as resp:
             await resp.text()
 
-    # Ждём пока CDP поднимется
     import asyncio
-    await asyncio.sleep(3)
+    await asyncio.sleep(1)
 
     mode = "через прокси" if enabled else "напрямую"
     return _text(f"Браузер перезапущен — трафик идёт {mode}")

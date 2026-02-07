@@ -1,5 +1,6 @@
 #!/bin/bash
 # Chromium с CDP (Chrome DevTools Protocol)
+# Всегда через tinyproxy на 127.0.0.1:8888
 
 # Ждём Xvfb
 sleep 2
@@ -19,23 +20,8 @@ export XDG_DATA_HOME=/home/browser/.local/share
 mkdir -p /home/browser/.cache/dconf
 mkdir -p /home/browser/.pki/nssdb
 
-# Определяем режим прокси: файл-флаг или env
-PROXY_FLAG=""
-CONTROL_FILE="/browser-control/proxy_enabled"
-if [ -f "$CONTROL_FILE" ]; then
-    # Управление через файл-флаг (от jobs контейнера)
-    PROXY_MODE=$(cat "$CONTROL_FILE" 2>/dev/null)
-else
-    # По умолчанию: прокси включён если HTTP_PROXY задан
-    PROXY_MODE=$([ -n "$HTTP_PROXY" ] && echo "1" || echo "0")
-fi
-
-if [ "$PROXY_MODE" = "1" ] && [ -n "$HTTP_PROXY" ]; then
-    PROXY_FLAG="--proxy-server=http://127.0.0.1:8888"
-fi
-
 exec chromium \
-    $PROXY_FLAG \
+    --proxy-server=http://127.0.0.1:8888 \
     --no-sandbox \
     --disable-gpu \
     --disable-dev-shm-usage \
