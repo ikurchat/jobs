@@ -129,6 +129,49 @@ class TestCreateDocument:
                 val = child.get(qn("w:val"))
                 assert val in ("none", "nil", None), f"Border {child.tag} has val={val}"
 
+    def test_header_table_grid(self, test_dir, config, sample_content):
+        from generate_docx import create_document
+
+        path = test_dir / "test_v1.docx"
+        create_document(sample_content, config, path)
+
+        doc = Document(str(path))
+        header_table = doc.tables[0]
+        tbl = header_table._tbl
+
+        # tblGrid must exist with 2 gridCol elements
+        grid = tbl.find(qn("w:tblGrid"))
+        assert grid is not None, "tblGrid missing"
+        cols = grid.findall(qn("w:gridCol"))
+        assert len(cols) == 2, f"Expected 2 gridCol, got {len(cols)}"
+
+        # Total width should match page usable width
+        page = config["page"]
+        expected_twips = int(
+            (page["width_cm"] - page["margin_left_cm"] - page["margin_right_cm"])
+            / 2.54 * 1440
+        )
+        actual_total = sum(int(c.get(qn("w:w"))) for c in cols)
+        assert abs(actual_total - expected_twips) < 10, \
+            f"Grid total {actual_total} != expected {expected_twips}"
+
+        # Left column should be ~60%
+        left_w = int(cols[0].get(qn("w:w")))
+        assert abs(left_w / actual_total - 0.6) < 0.05, \
+            f"Left column ratio {left_w/actual_total:.2f} != ~0.6"
+
+        # No tblLayout fixed
+        tblPr = tbl.tblPr
+        layout = tblPr.find(qn("w:tblLayout")) if tblPr is not None else None
+        if layout is not None:
+            assert layout.get(qn("w:type")) != "fixed", "tblLayout should not be fixed"
+
+        # Right cell should be right-aligned
+        right_cell = header_table.rows[0].cells[1]
+        for p in right_cell.paragraphs:
+            if p.text.strip():
+                assert p.alignment == 2, f"Right cell alignment: {p.alignment}"
+
     def test_body_content(self, test_dir, config, sample_content):
         from generate_docx import create_document
 
@@ -280,6 +323,22 @@ class TestPatchDocument:
             result = patch_document(source, fixes, config)
             doc2 = Document(str(result))
             assert "серьёзные" in doc2.paragraphs[target_idx].text
+
+    def test_patch_fix_header_table(self, test_dir, config, sample_content):
+        from generate_docx import create_document, patch_document
+
+        source = test_dir / "report_v1.docx"
+        create_document(sample_content, config, source)
+
+        fixes = {"fix_header_table": True}
+        result = patch_document(source, fixes, config)
+        doc = Document(str(result))
+
+        # Verify grid was set on header table
+        grid = doc.tables[0]._tbl.find(qn("w:tblGrid"))
+        assert grid is not None
+        cols = grid.findall(qn("w:gridCol"))
+        assert len(cols) == 2
 
 
 # ---------------------------------------------------------------------------

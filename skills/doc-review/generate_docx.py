@@ -149,13 +149,82 @@ def _set_cell_text(cell, text: str, config: dict, bold: bool = False) -> None:
     _apply_run_format(run, config, bold=bold)
 
 
+def _set_table_grid(table, col_widths_twips: list[int]) -> None:
+    """Set tblGrid with explicit gridCol widths and full-width tblW.
+
+    This is the authoritative way to control column widths in OOXML.
+    Word uses tblGrid/gridCol as the ground truth; cell.width and tblW
+    alone are often ignored.
+
+    Args:
+        table: python-docx Table object.
+        col_widths_twips: List of column widths in twips (1/1440 inch).
+    """
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    if tblPr is None:
+        tblPr = OxmlElement("w:tblPr")
+        tbl.insert(0, tblPr)
+
+    total_twips = sum(col_widths_twips)
+
+    # --- tblW: total table width ---
+    tblW = tblPr.find(qn("w:tblW"))
+    if tblW is None:
+        tblW = OxmlElement("w:tblW")
+        tblPr.append(tblW)
+    tblW.set(qn("w:w"), str(total_twips))
+    tblW.set(qn("w:type"), "dxa")
+
+    # --- Remove tblLayout fixed (let Word auto-fit) ---
+    tblLayout = tblPr.find(qn("w:tblLayout"))
+    if tblLayout is not None:
+        tblPr.remove(tblLayout)
+
+    # --- tblGrid: column definitions ---
+    old_grid = tbl.find(qn("w:tblGrid"))
+    if old_grid is not None:
+        tbl.remove(old_grid)
+
+    new_grid = OxmlElement("w:tblGrid")
+    for w in col_widths_twips:
+        col = OxmlElement("w:gridCol")
+        col.set(qn("w:w"), str(w))
+        new_grid.append(col)
+
+    # tblGrid must come right after tblPr in the XML
+    tblPr_index = list(tbl).index(tblPr)
+    tbl.insert(tblPr_index + 1, new_grid)
+
+    # --- Cell widths (tcW) must match gridCol ---
+    for row in table.rows:
+        for i, cell in enumerate(row.cells):
+            if i < len(col_widths_twips):
+                tcPr = cell._tc.get_or_add_tcPr()
+                tcW = tcPr.find(qn("w:tcW"))
+                if tcW is None:
+                    tcW = OxmlElement("w:tcW")
+                    tcPr.insert(0, tcW)
+                tcW.set(qn("w:w"), str(col_widths_twips[i]))
+                tcW.set(qn("w:type"), "dxa")
+
+
+def _page_width_twips(config: dict) -> int:
+    """Return usable page width (between margins) in twips."""
+    page = config["page"]
+    width_cm = page["width_cm"] - page["margin_left_cm"] - page["margin_right_cm"]
+    return int(width_cm / 2.54 * 1440)
+
+
 def _create_1x2_table(doc, left_text: str, right_text: str, config: dict,
                        left_bold: bool = False, right_bold: bool = False,
-                       right_align_right: bool = False):
+                       right_align_right: bool = False,
+                       left_pct: float = 0.5):
     """Create a 1x2 table without borders spanning full page width.
 
     Args:
         right_align_right: If True, right cell text is right-aligned.
+        left_pct: Left column share (0..1). Default 0.5 (50/50).
     Returns the created table.
     """
     table = doc.add_table(rows=1, cols=2)
@@ -163,29 +232,11 @@ def _create_1x2_table(doc, left_text: str, right_text: str, config: dict,
 
     _remove_table_borders(table)
 
-    # Set table width to full page width (between margins)
-    page_cfg = config["page"]
-    total_width_cm = page_cfg["width_cm"] - page_cfg["margin_left_cm"] - page_cfg["margin_right_cm"]
-    total_width_twips = int(total_width_cm / 2.54 * 1440)
-
-    tblPr = table._tbl.tblPr
-    if tblPr is None:
-        tblPr = OxmlElement("w:tblPr")
-        table._tbl.insert(0, tblPr)
-    tblW = tblPr.find(qn("w:tblW"))
-    if tblW is None:
-        tblW = OxmlElement("w:tblW")
-        tblPr.append(tblW)
-    tblW.set(qn("w:w"), str(total_width_twips))
-    tblW.set(qn("w:type"), "dxa")
-
-    # Set column widths (50/50)
-    left_width = Cm(total_width_cm * 0.5)
-    right_width = Cm(total_width_cm * 0.5)
-
-    for row in table.rows:
-        row.cells[0].width = left_width
-        row.cells[1].width = right_width
+    # Set proper grid with explicit column widths
+    total_twips = _page_width_twips(config)
+    left_twips = int(total_twips * left_pct)
+    right_twips = total_twips - left_twips
+    _set_table_grid(table, [left_twips, right_twips])
 
     _set_cell_text(table.rows[0].cells[0], left_text, config, bold=left_bold)
     _set_cell_text(table.rows[0].cells[1], right_text, config, bold=right_bold)
@@ -334,7 +385,8 @@ def create_document(content: dict, config: dict, output_path: Path) -> Path:
     # --- Header table ---
     title = content.get("title", "")
     addressee = content.get("addressee", "")
-    _create_1x2_table(doc, title, addressee, config, left_bold=True, right_align_right=True)
+    _create_1x2_table(doc, title, addressee, config,
+                       left_bold=True, right_align_right=True, left_pct=0.6)
 
     # --- Empty paragraph separator ---
     _add_formatted_paragraph(doc, "", config)
@@ -424,6 +476,10 @@ def patch_document(source_path: Path, fixes: dict, config: dict,
     if fixes.get("fix_page_setup"):
         _setup_page(doc, config)
 
+    # Fix header table grid (bug 12)
+    if fixes.get("fix_header_table") and doc.tables:
+        _fix_header_table_grid(doc.tables[0], config)
+
     # Replace paragraphs
     replacements = fixes.get("replace_paragraphs", {})
     for idx_str, new_text in replacements.items():
@@ -444,6 +500,20 @@ def patch_document(source_path: Path, fixes: dict, config: dict,
     return out_path
 
 
+def _fix_header_table_grid(table, config: dict) -> None:
+    """Fix header table: set full-width grid (60/40), right-align right cell."""
+    if len(table.columns) != 2:
+        return
+    total_twips = _page_width_twips(config)
+    left_twips = int(total_twips * 0.6)
+    right_twips = total_twips - left_twips
+    _set_table_grid(table, [left_twips, right_twips])
+
+    # Right-align right cell
+    for p in table.rows[0].cells[1].paragraphs:
+        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+
+
 def _fix_all_formatting(doc, config: dict) -> None:
     """Reapply correct formatting to all paragraphs and runs."""
     for paragraph in doc.paragraphs:
@@ -451,8 +521,11 @@ def _fix_all_formatting(doc, config: dict) -> None:
         for run in paragraph.runs:
             _apply_run_format(run, config)
 
-    # Fix tables
-    for table in doc.tables:
+    # Fix tables (text formatting + grid)
+    for i, table in enumerate(doc.tables):
+        # Fix header table grid (first table)
+        if i == 0 and len(table.columns) == 2:
+            _fix_header_table_grid(table, config)
         for row in table.rows:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
