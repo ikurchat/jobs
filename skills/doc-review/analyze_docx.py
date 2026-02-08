@@ -64,7 +64,7 @@ SEVERITY_MAP = {
     "BODY_SUBHEADERS": SEVERITY_RECOMMENDATION,
     "APPENDIX_TABLE_STRUCTURE": SEVERITY_DESIRABLE,
     "APPENDIX_TABLE_BORDERS": SEVERITY_DESIRABLE,
-    "SIGNATURE_TABLE_MISSING": SEVERITY_CRITICAL,
+    "SIGNATURE_TABLE_MISSING": SEVERITY_DESIRABLE,
     "SIGNATURE_TABLE_STRUCTURE": SEVERITY_DESIRABLE,
     "SIGNATURE_TABLE_BORDERS": SEVERITY_DESIRABLE,
     "FOOTER_MISSING": SEVERITY_CRITICAL,
@@ -804,20 +804,37 @@ def _check_structure(doc: Document, config: dict) -> tuple[list[dict], dict, lis
             "actual": "missing",
         })
     else:
-        # Check footer content pattern -- should contain phone-like pattern
+        # Check footer content: should have at least 2 non-empty lines (name + phone)
+        # or a single line with "тел." format
         footer_cfg = struct_cfg.get("footer", {})
-        template = footer_cfg.get("content_template", "{executor_name}, тел. {executor_phone}")
-        # Check that footer contains "тел." as a minimal content check
-        if "тел." in template and "тел." not in footer_text.lower():
-            issues.append({
-                "level": "format",
-                "severity": SEVERITY_MAP["FOOTER_CONTENT"],
-                "code": "FOOTER_CONTENT",
-                "message": f"Колонтитул не соответствует шаблону: '{footer_text[:80]}'",
-                "location": "footer",
-                "expected": template,
-                "actual": footer_text[:100],
-            })
+        footer_format = footer_cfg.get("format", "two_lines")
+        footer_lines = [p.text.strip() for p in doc.sections[0].footer.paragraphs if p.text.strip()]
+
+        if footer_format == "two_lines":
+            # Two-line format: name on line 1, phone on line 2
+            if len(footer_lines) < 2:
+                issues.append({
+                    "level": "format",
+                    "severity": SEVERITY_MAP["FOOTER_CONTENT"],
+                    "code": "FOOTER_CONTENT",
+                    "message": f"Колонтитул: ожидается 2 строки (ФИО + телефон), найдено {len(footer_lines)}",
+                    "location": "footer",
+                    "expected": "2 lines: name + phone",
+                    "actual": footer_text[:100],
+                })
+        else:
+            # Legacy single-line format with "тел."
+            template = footer_cfg.get("content_template", "{executor_name}, тел. {executor_phone}")
+            if "тел." in template and "тел." not in footer_text.lower():
+                issues.append({
+                    "level": "format",
+                    "severity": SEVERITY_MAP["FOOTER_CONTENT"],
+                    "code": "FOOTER_CONTENT",
+                    "message": f"Колонтитул не соответствует шаблону: '{footer_text[:80]}'",
+                    "location": "footer",
+                    "expected": template,
+                    "actual": footer_text[:100],
+                })
 
     # --- Body subheaders ---
     body_paragraphs = _identify_body_paragraphs(

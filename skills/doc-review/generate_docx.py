@@ -14,8 +14,8 @@ import sys
 from pathlib import Path
 
 from docx import Document
-from docx.shared import Pt, Cm
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Pt, Cm, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
@@ -150,18 +150,38 @@ def _set_cell_text(cell, text: str, config: dict, bold: bool = False) -> None:
 
 
 def _create_1x2_table(doc, left_text: str, right_text: str, config: dict,
-                       left_bold: bool = False, right_bold: bool = False):
-    """Create a 1x2 table without borders. Returns the created table."""
+                       left_bold: bool = False, right_bold: bool = False,
+                       right_align_right: bool = False):
+    """Create a 1x2 table without borders spanning full page width.
+
+    Args:
+        right_align_right: If True, right cell text is right-aligned.
+    Returns the created table.
+    """
     table = doc.add_table(rows=1, cols=2)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
     _remove_table_borders(table)
 
-    # Set column widths (roughly 50/50, adjusted for content)
+    # Set table width to full page width (between margins)
     page_cfg = config["page"]
-    total_width = page_cfg["width_cm"] - page_cfg["margin_left_cm"] - page_cfg["margin_right_cm"]
-    left_width = Cm(total_width * 0.5)
-    right_width = Cm(total_width * 0.5)
+    total_width_cm = page_cfg["width_cm"] - page_cfg["margin_left_cm"] - page_cfg["margin_right_cm"]
+    total_width_twips = int(total_width_cm / 2.54 * 1440)
+
+    tblPr = table._tbl.tblPr
+    if tblPr is None:
+        tblPr = OxmlElement("w:tblPr")
+        table._tbl.insert(0, tblPr)
+    tblW = tblPr.find(qn("w:tblW"))
+    if tblW is None:
+        tblW = OxmlElement("w:tblW")
+        tblPr.append(tblW)
+    tblW.set(qn("w:w"), str(total_width_twips))
+    tblW.set(qn("w:type"), "dxa")
+
+    # Set column widths (50/50)
+    left_width = Cm(total_width_cm * 0.5)
+    right_width = Cm(total_width_cm * 0.5)
 
     for row in table.rows:
         row.cells[0].width = left_width
@@ -169,6 +189,11 @@ def _create_1x2_table(doc, left_text: str, right_text: str, config: dict,
 
     _set_cell_text(table.rows[0].cells[0], left_text, config, bold=left_bold)
     _set_cell_text(table.rows[0].cells[1], right_text, config, bold=right_bold)
+
+    # Right-align right cell if requested
+    if right_align_right:
+        for p in table.rows[0].cells[1].paragraphs:
+            p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
     return table
 
@@ -194,36 +219,88 @@ def _setup_page(doc, config: dict) -> None:
 # Footer
 # ---------------------------------------------------------------------------
 
-def _setup_footer(doc, executor_name: str, executor_phone: str, config: dict) -> None:
-    """Add footer with executor info."""
-    section = doc.sections[0]
-    footer = section.footer
-    footer.is_linked_to_previous = False
+def _make_footer_run(paragraph, text: str, config: dict) -> None:
+    """Add a run to a footer paragraph with proper formatting."""
+    footer_cfg = config["structure"]["footer"]
+    font_name = config["formatting"]["font_name"]
+    font_size = footer_cfg.get("font_size_pt", 12)
 
-    # Clear existing
-    for p in footer.paragraphs:
-        p.clear()
+    run = paragraph.add_run(text)
+    run.font.name = font_name
+    run.font.size = Pt(font_size)
+    run.font.color.rgb = RGBColor(0, 0, 0)
 
-    p = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
-
-    template = config["structure"]["footer"]["content_template"]
-    text = template.format(executor_name=executor_name, executor_phone=executor_phone)
-
-    run = p.add_run(text)
-    footer_font_size = config["structure"]["footer"].get("font_size_pt", 10)
-    run.font.name = config["formatting"]["font_name"]
-    run.font.size = Pt(footer_font_size)
-
-    # Set Cyrillic font
+    # Set Cyrillic font faces
     rPr = run._element.get_or_add_rPr()
     rFonts = rPr.find(qn("w:rFonts"))
     if rFonts is None:
         rFonts = OxmlElement("w:rFonts")
         rPr.insert(0, rFonts)
-    rFonts.set(qn("w:ascii"), config["formatting"]["font_name"])
-    rFonts.set(qn("w:hAnsi"), config["formatting"]["font_name"])
-    rFonts.set(qn("w:cs"), config["formatting"]["font_name"])
-    rFonts.set(qn("w:eastAsia"), config["formatting"]["font_name"])
+    rFonts.set(qn("w:ascii"), font_name)
+    rFonts.set(qn("w:hAnsi"), font_name)
+    rFonts.set(qn("w:cs"), font_name)
+    rFonts.set(qn("w:eastAsia"), font_name)
+
+
+def _apply_footer_paragraph_format(paragraph) -> None:
+    """Apply zero-spacing single-line format to a footer paragraph."""
+    pf = paragraph.paragraph_format
+    pf.space_before = Pt(0)
+    pf.space_after = Pt(0)
+    pf.line_spacing_rule = WD_LINE_SPACING.SINGLE
+
+
+def _clear_footer_xml(footer) -> None:
+    """Properly clear footer by removing all child elements from XML."""
+    footer_element = footer._element
+    for child in list(footer_element):
+        footer_element.remove(child)
+
+
+def _clear_header_xml(header) -> None:
+    """Clear header XML completely, removing SDT elements and adding empty paragraph."""
+    header_element = header._element
+    for child in list(header_element):
+        header_element.remove(child)
+    # Add one empty paragraph (required by OOXML)
+    empty_p = OxmlElement("w:p")
+    header_element.append(empty_p)
+
+
+def _remove_title_page_flag(section) -> None:
+    """Remove <w:titlePg/> from sectPr to disable 'Different First Page'."""
+    sectPr = section._sectPr
+    title_pg = sectPr.find(qn("w:titlePg"))
+    if title_pg is not None:
+        sectPr.remove(title_pg)
+
+
+def _setup_footer(doc, executor_name: str, executor_phone: str, config: dict) -> None:
+    """Add footer with executor info: name on line 1, phone on line 2."""
+    section = doc.sections[0]
+
+    # Remove "Different First Page" flag so footer shows on page 1
+    _remove_title_page_flag(section)
+
+    # Clear any existing header SDT/PAGE elements (bug 5)
+    header = section.header
+    header.is_linked_to_previous = False
+    _clear_header_xml(header)
+
+    # Properly clear existing footer XML (bug 4)
+    footer = section.footer
+    footer.is_linked_to_previous = False
+    _clear_footer_xml(footer)
+
+    # Line 1: executor name
+    p1 = footer.add_paragraph()
+    _apply_footer_paragraph_format(p1)
+    _make_footer_run(p1, executor_name, config)
+
+    # Line 2: phone number
+    p2 = footer.add_paragraph()
+    _apply_footer_paragraph_format(p2)
+    _make_footer_run(p2, executor_phone, config)
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +334,7 @@ def create_document(content: dict, config: dict, output_path: Path) -> Path:
     # --- Header table ---
     title = content.get("title", "")
     addressee = content.get("addressee", "")
-    _create_1x2_table(doc, title, addressee, config, left_bold=True)
+    _create_1x2_table(doc, title, addressee, config, left_bold=True, right_align_right=True)
 
     # --- Empty paragraph separator ---
     _add_formatted_paragraph(doc, "", config)

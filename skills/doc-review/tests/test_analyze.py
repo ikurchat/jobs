@@ -67,13 +67,21 @@ def _create_conforming_document(path: Path, config: dict) -> Document:
     _set_cell(sig_table.rows[0].cells[0], "Начальник отдела ИБ", config)
     _set_cell(sig_table.rows[0].cells[1], "Петров П.П.", config)
 
-    # Footer
+    # Footer (2-line format: name + phone)
     footer = section.footer
     footer.is_linked_to_previous = False
-    p = footer.paragraphs[0]
-    run = p.add_run("Сидоров С.С., тел. 1234")
-    run.font.name = fmt["font_name"]
-    run.font.size = Pt(10)
+    p1 = footer.paragraphs[0]
+    run1 = p1.add_run("Сидоров С.С.")
+    run1.font.name = fmt["font_name"]
+    run1.font.size = Pt(12)
+    from docx.oxml import OxmlElement as OE2
+    p2_el = OE2("w:p")
+    footer._element.append(p2_el)
+    from docx.text.paragraph import Paragraph
+    p2 = Paragraph(p2_el, footer)
+    run2 = p2.add_run("тел. 1234")
+    run2.font.name = fmt["font_name"]
+    run2.font.size = Pt(12)
 
     doc.save(str(path))
     return doc

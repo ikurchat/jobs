@@ -49,8 +49,10 @@
       "right_cell": "full_name"
     },
     "footer": {
-      "content_template": "{executor_name}, тел. {executor_phone}",
-      "font_size_pt": 10
+      "format": "two_lines",
+      "content_template": "{executor_name}\n{executor_phone}",
+      "font_size_pt": 12,
+      "line_spacing": "single"
     }
   },
 

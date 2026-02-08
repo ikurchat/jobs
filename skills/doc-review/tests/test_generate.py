@@ -181,9 +181,36 @@ class TestCreateDocument:
 
         doc = Document(str(path))
         footer = doc.sections[0].footer
-        footer_text = " ".join(p.text for p in footer.paragraphs)
-        assert "Сидоров" in footer_text
-        assert "1234" in footer_text
+        footer_lines = [p.text.strip() for p in footer.paragraphs if p.text.strip()]
+        assert len(footer_lines) >= 2, f"Footer should have 2 lines, got {footer_lines}"
+        assert "Сидоров" in footer_lines[0], f"Line 1 should have name, got: {footer_lines[0]}"
+        assert "1234" in footer_lines[1], f"Line 2 should have phone, got: {footer_lines[1]}"
+
+    def test_footer_font_size(self, test_dir, config, sample_content):
+        from generate_docx import create_document
+
+        path = test_dir / "test_v1.docx"
+        create_document(sample_content, config, path)
+
+        doc = Document(str(path))
+        footer = doc.sections[0].footer
+        for p in footer.paragraphs:
+            for run in p.runs:
+                if run.text.strip():
+                    assert run.font.size == Pt(12), \
+                        f"Footer font size is {run.font.size}, expected 12pt"
+
+    def test_no_title_page_flag(self, test_dir, config, sample_content):
+        from generate_docx import create_document
+
+        path = test_dir / "test_v1.docx"
+        create_document(sample_content, config, path)
+
+        doc = Document(str(path))
+        section = doc.sections[0]
+        sectPr = section._sectPr
+        title_pg = sectPr.find(qn("w:titlePg"))
+        assert title_pg is None, "titlePg flag should be removed"
 
     def test_font_in_body(self, test_dir, config, sample_content):
         from generate_docx import create_document
