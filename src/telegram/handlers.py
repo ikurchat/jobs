@@ -22,6 +22,7 @@ from src.users import get_session_manager, get_users_repository
 from src.users.tools import set_telegram_sender, set_context_sender, set_buffer_sender, set_task_executor
 from src.triggers.executor import TriggerExecutor
 from src.media import transcribe_audio, save_media, MAX_MEDIA_SIZE
+from src.updater import Updater
 
 MAX_TG_LENGTH = 4000
 TYPING_REFRESH_INTERVAL = 3.0
@@ -87,6 +88,7 @@ class TelegramHandlers:
     def __init__(self, client: TelegramClient, executor: TriggerExecutor | None = None) -> None:
         self._client = client
         self._is_premium: bool | None = None  # Lazy-init
+        self._updater = Updater()
 
         # Настраиваем sender'ы для user tools
         set_telegram_sender(self._send_message)
@@ -220,6 +222,13 @@ class TelegramHandlers:
                 await event.reply("Остановлено.")
             else:
                 await event.reply("Нечего останавливать.")
+            return
+
+        # /update — обновление из git (только owner)
+        if message.text and message.text.strip().lower() == "/update":
+            if not is_owner:
+                return
+            await event.reply(await self._updater.handle())
             return
 
         # /usage — показать usage аккаунта (только owner)

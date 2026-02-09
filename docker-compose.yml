@@ -42,6 +42,15 @@ services:
       retries: 5
       start_period: 30s
 
+  updater:
+    build: ./updater
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PWD}:${PWD}
+    environment:
+      - COMPOSE_DIR=${PWD}
+    restart: unless-stopped
+
 volumes:
   jobs-workspace:                 # Named volume для workspace
   browser-profile:                # Профиль Chromium (куки, сессии, история)
