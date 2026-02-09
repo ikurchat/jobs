@@ -14,7 +14,7 @@ from typing import Any
 import aiohttp
 from telethon import TelegramClient, events
 from telethon.tl.functions.messages import SetTypingRequest
-from telethon.tl.types import SendMessageTypingAction, SendMessageCancelAction
+from telethon.tl.types import SendMessageTypingAction, SendMessageCancelAction, MessageEntityCustomEmoji
 from loguru import logger
 
 from src.config import settings, set_owner_info
@@ -25,6 +25,60 @@ from src.media import transcribe_audio, save_media, MAX_MEDIA_SIZE
 
 MAX_TG_LENGTH = 4000
 TYPING_REFRESH_INTERVAL = 3.0
+LOADING_EMOJI_ID = 5255778087437617493
+MAX_DONE_LENGTH = 200
+
+
+class StatusTracker:
+    """Управляет статусным сообщением с двумя слотами: active (тул) и done (результат)."""
+
+    def __init__(self, event: Any, is_premium: bool) -> None:
+        self._event = event
+        self._is_premium = is_premium
+        self._msg: Any | None = None
+        self._active: str | None = None
+        self._done: str | None = None
+
+    async def set_active(self, text: str) -> None:
+        """Обновляет верхний слот (текущее действие)."""
+        self._active = text
+        await self._update()
+
+    async def set_done(self, text: str) -> None:
+        """Обновляет нижний слот (результат предыдущего действия)."""
+        self._done = text[:MAX_DONE_LENGTH] if len(text) > MAX_DONE_LENGTH else text
+        if self._active:
+            await self._update()
+
+    async def delete(self) -> None:
+        """Удаляет статусное сообщение."""
+        if self._msg:
+            try:
+                await self._msg.delete()
+            except Exception:
+                pass
+            self._msg = None
+
+    async def _update(self) -> None:
+        text, entities = self._render()
+        if self._msg is None:
+            self._msg = await self._event.reply(text, formatting_entities=entities)
+        else:
+            try:
+                await self._msg.edit(text, formatting_entities=entities)
+            except Exception:
+                pass
+
+    def _render(self) -> tuple[str, list | None]:
+        icon = "⏳" if self._is_premium else "🪛"
+        text = f"{icon} {self._active}"
+        if self._done:
+            text += f"\n\n☑️ {self._done}"
+
+        entities = None
+        if self._is_premium:
+            entities = [MessageEntityCustomEmoji(offset=0, length=1, document_id=LOADING_EMOJI_ID)]
+        return text, entities
 
 
 class TelegramHandlers:
@@ -32,6 +86,7 @@ class TelegramHandlers:
 
     def __init__(self, client: TelegramClient, executor: TriggerExecutor | None = None) -> None:
         self._client = client
+        self._is_premium: bool | None = None  # Lazy-init
 
         # Настраиваем sender'ы для user tools
         set_telegram_sender(self._send_message)
@@ -234,64 +289,35 @@ class TelegramHandlers:
             return
 
         last_typing = asyncio.get_event_loop().time()
-        has_sent_anything = False
-        tool_msg = None  # Сообщение со статусом tool
+        status = StatusTracker(event, await self._check_premium())
 
         try:
             async for text, tool_name, is_final in session.query_stream(prompt):
-                # Поддерживаем typing
                 now = asyncio.get_event_loop().time()
                 if now - last_typing > TYPING_REFRESH_INTERVAL:
                     await self._set_typing(input_chat, typing=True)
                     last_typing = now
 
-                # Tool call — показываем статус
                 if tool_name:
-                    tool_display = self._format_tool(tool_name)
-                    if tool_msg is None:
-                        tool_msg = await event.reply(tool_display)
-                    else:
-                        await self._safe_edit(tool_msg, tool_display)
-                    continue
-
-                # Промежуточный текст — отправляем отдельным сообщением
-                if text and not is_final:
+                    await status.set_active(self._format_tool(tool_name))
+                elif text and not is_final:
                     text_clean = text.strip()
                     if text_clean:
-                        # Удаляем сообщение о tool если было
-                        if tool_msg:
-                            await self._safe_delete(tool_msg)
-                            tool_msg = None
-                        await event.reply(text_clean)
-                        has_sent_anything = True
-                        # Восстанавливаем typing после отправки
-                        await self._set_typing(input_chat, typing=True)
-                        last_typing = asyncio.get_event_loop().time()
-
-                # Финальный ответ
+                        await status.set_done(text_clean)
                 elif is_final and text:
                     final_text = text.strip()
                     if final_text:
-                        # Ошибки показываем всегда, обычный текст — только если ничего не отправляли
-                        is_error = final_text.startswith("Ошибка:")
-                        if is_error or not has_sent_anything:
-                            if tool_msg:
-                                await self._safe_delete(tool_msg)
-                                tool_msg = None
-                            await event.reply(final_text)
+                        await status.delete()
+                        await event.reply(final_text)
 
         except Exception as e:
             logger.error(f"Error: {e}")
-            if tool_msg:
-                await self._safe_delete(tool_msg)
-                tool_msg = None
+            await status.delete()
             await event.reply(f"Ошибка: {e}")
 
         finally:
             await self._set_typing(input_chat, typing=False)
-            # Удаляем tool message если остался
-            if tool_msg:
-                await self._safe_delete(tool_msg)
+            await status.delete()
 
     async def _set_typing(self, chat: Any, typing: bool) -> None:
         """Устанавливает статус typing."""
@@ -301,19 +327,15 @@ class TelegramHandlers:
         except Exception as e:
             logger.debug(f"Typing status error: {e}")
 
-    async def _safe_edit(self, message: Any, text: str) -> None:
-        """Безопасно редактирует сообщение."""
-        try:
-            await message.edit(text)
-        except Exception:
-            pass
-
-    async def _safe_delete(self, message: Any) -> None:
-        """Безопасно удаляет сообщение."""
-        try:
-            await message.delete()
-        except Exception:
-            pass
+    async def _check_premium(self) -> bool:
+        """Проверяет наличие premium у аккаунта (с кешированием)."""
+        if self._is_premium is None:
+            try:
+                me = await self._client.get_me()
+                self._is_premium = bool(getattr(me, "premium", False))
+            except Exception:
+                self._is_premium = False
+        return self._is_premium
 
     async def _fetch_usage(self) -> str:
         """Запрашивает usage аккаунта через OAuth API."""
@@ -409,14 +431,19 @@ class TelegramHandlers:
         return f"[{' | '.join(parts)}]"
 
     def _format_tool(self, tool_name: str) -> str:
-        """Форматирует название инструмента в читаемый вид."""
-        # Skill:name → "⚡ Skill Name..."
+        """Форматирует название тула в читаемый текст."""
         if tool_name.startswith("Skill:"):
             skill_name = tool_name.split(":", 1)[1]
             display = skill_name.replace("-", " ").replace("_", " ").title()
             return f"Skill: {display}..."
 
-        # Убираем префиксы mcp__jobs__ и mcp__*__
+        if tool_name.startswith("Bash:"):
+            command = tool_name.split(":", 1)[1].strip()
+            if len(command) > 120:
+                command = command[:120] + "..."
+            return f"Выполняю команду...\n\n{command}"
+
+        # Убираем префиксы mcp__*__
         clean_name = tool_name
         if clean_name.startswith("mcp__"):
             parts = clean_name.split("__")

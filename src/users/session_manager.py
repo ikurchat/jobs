@@ -292,6 +292,15 @@ class UserSession:
 
         return text_parts[-1] if text_parts else "Нет ответа"
 
+    @staticmethod
+    def _format_tool_display(block: ToolUseBlock) -> str:
+        """Формирует display-имя тула для стрима."""
+        if block.name == "Skill" and block.input.get("skill"):
+            return f"Skill:{block.input['skill']}"
+        if block.name == "Bash" and block.input.get("command"):
+            return f"Bash:{block.input['command']}"
+        return block.name
+
     async def query_stream(self, prompt: str) -> AsyncIterator[tuple[str | None, str | None, bool]]:
         """
         Стримит ответ.
@@ -329,9 +338,7 @@ class UserSession:
                                 text_buffer.append(block.text)
                                 yield (block.text, None, False)
                             elif isinstance(block, ToolUseBlock):
-                                tool_display = block.name
-                                if block.name == "Skill" and block.input.get("skill"):
-                                    tool_display = f"Skill:{block.input['skill']}"
+                                tool_display = self._format_tool_display(block)
                                 yield (None, tool_display, False)
 
                     elif isinstance(message, ResultMessage):
@@ -361,9 +368,7 @@ class UserSession:
                                     text_buffer.append(block.text)
                                     yield (block.text, None, False)
                                 elif isinstance(block, ToolUseBlock):
-                                    tool_display = block.name
-                                    if block.name == "Skill" and block.input.get("skill"):
-                                        tool_display = f"Skill:{block.input['skill']}"
+                                    tool_display = self._format_tool_display(block)
                                     yield (None, tool_display, False)
 
                         elif isinstance(message, ResultMessage):
@@ -375,7 +380,7 @@ class UserSession:
                             interrupted = True
                             logger.debug(f"Interrupted follow-up [{self.telegram_id}]")
 
-                yield ("".join(text_buffer), None, True)
+                yield (text_buffer[-1] if text_buffer else None, None, True)
 
         except TimeoutError:
             logger.error(f"Query timeout [{self.telegram_id}]")
