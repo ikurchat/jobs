@@ -58,8 +58,8 @@
       "content_template": "{executor_name}\n{executor_phone}",
       "font_size_pt": 12,
       "line_spacing": "single",
-      "placement": "body",
-      "placement_note": "executor block goes in document body after signature, NOT in page footer"
+      "placement": "body_invisible_table",
+      "placement_note": "executor as borderless 1x1 table at the very end of body, after signature + spacers. NOT in footer element."
     }
   },
 

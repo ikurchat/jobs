@@ -209,10 +209,10 @@ class TestCreateDocument:
         create_document(sample_content, config, path)
 
         doc = Document(str(path))
-        # Last table should be signature
-        last_table = doc.tables[-1]
+        # Signature table is second-to-last (last is executor table)
+        sig_table = doc.tables[-2]
         all_text = ""
-        for row in last_table.rows:
+        for row in sig_table.rows:
             for cell in row.cells:
                 all_text += cell.text + " "
         assert "Петров" in all_text or "Начальник" in all_text
@@ -224,12 +224,14 @@ class TestCreateDocument:
         create_document(sample_content, config, path)
 
         doc = Document(str(path))
-        # Executor is now in document body (NOT footer)
-        body_text = " ".join(p.text for p in doc.paragraphs)
-        assert "Сидоров" in body_text, \
-            "Executor name should appear in document body"
-        assert "1234" in body_text, \
-            "Executor phone should appear in document body"
+        # Executor is now in an invisible 1x1 table at end of body
+        exec_table = doc.tables[-1]
+        assert len(exec_table.columns) == 1, "Executor table should be 1x1"
+        cell_text = exec_table.rows[0].cells[0].text
+        assert "Сидоров" in cell_text, \
+            "Executor name should appear in executor table"
+        assert "1234" in cell_text, \
+            "Executor phone should appear in executor table"
 
     def test_executor_not_in_footer(self, test_dir, config, sample_content):
         from generate_docx import create_document
@@ -292,21 +294,26 @@ class TestCreateDocument:
 
     def test_signature_table_center_aligned(self, test_dir, config, sample_content):
         from generate_docx import create_document
+        from docx.oxml.ns import qn
 
         path = test_dir / "test_v1.docx"
         create_document(sample_content, config, path)
 
         doc = Document(str(path))
-        sig_table = doc.tables[-1]
-        # Right cell (name) should be center-aligned with firstLine indent
+        # Signature table is second-to-last (last is executor table)
+        sig_table = doc.tables[-2]
         right_cell = sig_table.rows[0].cells[1]
         for p in right_cell.paragraphs:
             if p.text.strip():
                 assert p.alignment == WD_ALIGN_PARAGRAPH.CENTER, \
                     f"Signature name should be center-aligned, got {p.alignment}"
-                assert p.paragraph_format.first_line_indent is not None and \
-                    p.paragraph_format.first_line_indent > 0, \
-                    f"Signature firstLine should be set, got {p.paragraph_format.first_line_indent}"
+                # firstLine is set via XML (not python-docx API)
+                pPr = p._element.find(qn("w:pPr"))
+                ind = pPr.find(qn("w:ind")) if pPr is not None else None
+                assert ind is not None, "w:ind element should exist"
+                fl = ind.get(qn("w:firstLine"))
+                assert fl is not None and int(fl) > 0, \
+                    f"Signature firstLine should be set via XML, got {fl}"
 
     def test_appendix_numbered_items(self, test_dir, config, sample_content):
         from generate_docx import create_document
@@ -396,8 +403,8 @@ class TestCreateDocument:
         create_document(content, config, path)
 
         doc = Document(str(path))
-        # Should have 2 tables: header + signature (no appendix)
-        assert len(doc.tables) == 2
+        # Should have 3 tables: header + signature + executor (no appendix)
+        assert len(doc.tables) == 3
 
 
 # ---------------------------------------------------------------------------

@@ -376,17 +376,80 @@ def _remove_title_page_flag(section) -> None:
         sectPr.remove(title_pg)
 
 
-def _setup_executor_in_body(doc, executor_name: str, executor_phone: str, config: dict, spacer_count: int = 13) -> None:
-    """Add executor info in document body (NOT footer) after signature table.
+def _calc_executor_spacers(doc, config: dict) -> int:
+    """Calculate number of spacer paragraphs needed to push executor table to page bottom.
 
-    Adds spacer paragraphs to push executor block to bottom of page.
+    Estimates total content height in points, determines which page the signature
+    lands on, and calculates remaining space on that page minus executor height.
+    Returns number of 12pt single-spaced empty paragraphs needed.
+    """
+    body = doc.element.body
+    usable_h_pt = _page_usable_height_pt(config)
+    content_h_pt = 0.0
+
+    for child in body:
+        tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+        if tag == 'sectPr':
+            continue
+        if tag == 'tbl':
+            # Estimate table height: count paragraphs across all cells
+            paras = child.findall(f'.//{qn("w:p")}')
+            content_h_pt += len(paras) * 14 * 1.5  # rough: 14pt * 1.5 spacing per para
+        elif tag == 'p':
+            text = ''.join(n.text or '' for n in child.iter(qn('w:t')))
+            sz_el = child.find(f'.//{qn("w:sz")}')
+            font_pt = int(sz_el.get(qn('w:val'), '28')) / 2 if sz_el is not None else 14
+            pPr = child.find(qn('w:pPr'))
+            spacing = pPr.find(qn('w:spacing')) if pPr is not None else None
+            if spacing is not None:
+                line_val = int(spacing.get(qn('w:line'), '360'))
+            else:
+                line_val = 360
+            line_mult = line_val / 240
+
+            if not text.strip():
+                content_h_pt += font_pt * line_mult
+            else:
+                chars_per_line = 80
+                lines = max(1, len(text) / chars_per_line)
+                content_h_pt += lines * font_pt * line_mult
+
+    # Which page does this land on?
+    page_num = int(content_h_pt // usable_h_pt) + 1
+    used_on_last_page = content_h_pt - (page_num - 1) * usable_h_pt
+
+    # Executor table = 2 lines * 12pt = 24pt
+    executor_h_pt = 24
+    remaining = usable_h_pt - used_on_last_page - executor_h_pt
+
+    if remaining <= 0:
+        return 0
+
+    spacer_h = 12  # 12pt single-spaced empty paragraph
+    return max(0, int(remaining / spacer_h) - 1)  # -1 for safety margin
+
+
+def _page_usable_height_pt(config: dict) -> float:
+    """Return usable page height (between margins) in points."""
+    page = config["page"]
+    h_cm = page["height_cm"] - page["margin_top_cm"] - page["margin_bottom_cm"]
+    return h_cm / 2.54 * 72
+
+
+def _create_executor_table(doc, executor_name: str, executor_phone: str, config: dict) -> None:
+    """Add executor info as invisible (borderless) 1x1 table at the very end of body.
+
+    Automatically calculates spacer paragraphs to push the table to the bottom
+    of the page where the signature is located.
+
     executor_name MUST be full name (Фамилия Имя Отчество).
     """
     footer_cfg = config["structure"]["footer"]
     font_name = config["formatting"]["font_name"]
     font_size = footer_cfg.get("font_size_pt", 12)
 
-    # Spacer paragraphs
+    # Calculate and add spacers
+    spacer_count = _calc_executor_spacers(doc, config)
     for _ in range(spacer_count):
         p = doc.add_paragraph()
         pf = p.paragraph_format
@@ -394,28 +457,65 @@ def _setup_executor_in_body(doc, executor_name: str, executor_phone: str, config
         pf.space_after = Pt(0)
         pf.line_spacing_rule = WD_LINE_SPACING.SINGLE
         pf.first_line_indent = None
+        # 12pt invisible run to set line height
+        run = p.add_run()
+        run.font.size = Pt(12)
 
-    # Line 1: full name (12pt)
-    p1 = doc.add_paragraph()
-    p1.paragraph_format.space_before = Pt(0)
-    p1.paragraph_format.space_after = Pt(0)
-    p1.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
-    p1.paragraph_format.first_line_indent = None
-    run1 = p1.add_run(executor_name)
-    run1.font.name = font_name
-    run1.font.size = Pt(font_size)
-    _set_cyrillic_fonts(run1, font_name)
+    # Create 1x1 invisible table
+    table = doc.add_table(rows=1, cols=1)
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    _remove_table_borders(table)
 
-    # Line 2: phone (12pt)
-    p2 = doc.add_paragraph()
-    p2.paragraph_format.space_before = Pt(0)
-    p2.paragraph_format.space_after = Pt(0)
-    p2.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
-    p2.paragraph_format.first_line_indent = None
-    run2 = p2.add_run(executor_phone)
-    run2.font.name = font_name
-    run2.font.size = Pt(font_size)
-    _set_cyrillic_fonts(run2, font_name)
+    cell = table.rows[0].cells[0]
+    _set_cell_margins(cell, top=0, bottom=0, left=0, right=0)
+
+    # Remove default paragraph, build from scratch
+    tc = cell._tc
+    for p_elem in tc.findall(qn("w:p")):
+        tc.remove(p_elem)
+
+    def _make_executor_para(text):
+        p = OxmlElement("w:p")
+        pPr = OxmlElement("w:pPr")
+        jc = OxmlElement("w:jc")
+        jc.set(qn("w:val"), "left")
+        pPr.append(jc)
+        ind = OxmlElement("w:ind")
+        ind.set(qn("w:firstLine"), "0")
+        ind.set(qn("w:left"), "0")
+        pPr.append(ind)
+        spacing = OxmlElement("w:spacing")
+        spacing.set(qn("w:before"), "0")
+        spacing.set(qn("w:after"), "0")
+        spacing.set(qn("w:line"), "240")
+        spacing.set(qn("w:lineRule"), "auto")
+        pPr.append(spacing)
+        p.append(pPr)
+
+        r = OxmlElement("w:r")
+        rPr = OxmlElement("w:rPr")
+        rFonts = OxmlElement("w:rFonts")
+        rFonts.set(qn("w:ascii"), font_name)
+        rFonts.set(qn("w:hAnsi"), font_name)
+        rFonts.set(qn("w:cs"), font_name)
+        rFonts.set(qn("w:eastAsia"), font_name)
+        rPr.append(rFonts)
+        sz = OxmlElement("w:sz")
+        sz.set(qn("w:val"), str(font_size * 2))
+        rPr.append(sz)
+        szCs = OxmlElement("w:szCs")
+        szCs.set(qn("w:val"), str(font_size * 2))
+        rPr.append(szCs)
+        r.append(rPr)
+        t = OxmlElement("w:t")
+        t.set(qn("xml:space"), "preserve")
+        t.text = text
+        r.append(t)
+        p.append(r)
+        return p
+
+    tc.append(_make_executor_para(executor_name))
+    tc.append(_make_executor_para(executor_phone))
 
 
 def _setup_page_numbering(doc, config: dict) -> None:
@@ -510,6 +610,8 @@ def _create_signature_table(doc, position: str, name: str, config: dict):
 
     # Left: position
     _set_cell_text(table.rows[0].cells[0], position, config)
+    for p in table.rows[0].cells[0].paragraphs:
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
     # Right: И.О. Фамилия with spaces
     cell_right = table.rows[0].cells[1]
@@ -523,7 +625,12 @@ def _create_signature_table(doc, position: str, name: str, config: dict):
     spaces = sig_cfg.get("right_cell_spaces", 18)
     first_line = sig_cfg.get("right_cell_first_line", 567)
     p0.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p0.paragraph_format.first_line_indent = first_line
+    pPr = p0._element.get_or_add_pPr()
+    ind = pPr.find(qn("w:ind"))
+    if ind is None:
+        ind = OxmlElement("w:ind")
+        pPr.append(ind)
+    ind.set(qn("w:firstLine"), str(first_line))
     p0.paragraph_format.space_before = Pt(0)
     p0.paragraph_format.space_after = Pt(0)
 
@@ -601,7 +708,7 @@ def create_document(content: dict, config: dict, output_path: Path) -> Path:
     title = content.get("title", "")
     addressee = content.get("addressee", "")
     header_table = _create_1x2_table(doc, title, addressee, config,
-                                      left_bold=True, right_align_right=True,
+                                      left_bold=False, right_align_right=True,
                                       left_pct=0.6)
     # Header table only: zero cell margins so addressee right edge sits
     # exactly at the page right margin; left-align title (not justify).
@@ -610,6 +717,22 @@ def create_document(content: dict, config: dict, output_path: Path) -> Path:
     # Title cell: left-aligned, not justified
     for p in header_table.rows[0].cells[0].paragraphs:
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    # Add spacers before title in left cell
+    cell0 = header_table.rows[0].cells[0]
+    tc0 = cell0._tc
+    title_p = cell0.paragraphs[0]._element
+    for _ in range(4):
+        empty_p = OxmlElement("w:p")
+        pPr_el = OxmlElement("w:pPr")
+        sp = OxmlElement("w:spacing")
+        sp.set(qn("w:after"), "0")
+        sp.set(qn("w:before"), "0")
+        sp.set(qn("w:line"), "276")
+        sp.set(qn("w:lineRule"), "auto")
+        pPr_el.append(sp)
+        empty_p.append(pPr_el)
+        tc0.insert(tc0.index(title_p), empty_p)
 
     # --- Two empty lines after header ---
     _add_formatted_paragraph(doc, "", config)
@@ -623,18 +746,12 @@ def create_document(content: dict, config: dict, output_path: Path) -> Path:
             if para_text.strip():
                 _add_formatted_paragraph(doc, para_text.strip(), config)
 
-    # Separator
-    _add_formatted_paragraph(doc, "", config)
-
     # Block 2: Details
     details_text = content.get("details", "")
     if details_text:
         for para_text in details_text.split("\n\n"):
             if para_text.strip():
                 _add_formatted_paragraph(doc, para_text.strip(), config)
-
-    # Separator
-    _add_formatted_paragraph(doc, "", config)
 
     # Block 3: Conclusions
     conclusions_text = content.get("conclusions", "")
@@ -662,7 +779,7 @@ def create_document(content: dict, config: dict, output_path: Path) -> Path:
     executor_name = content.get("executor_name", "")
     executor_phone = content.get("executor_phone", "")
     if executor_name:
-        _setup_executor_in_body(doc, executor_name, executor_phone, config)
+        _create_executor_table(doc, executor_name, executor_phone, config)
 
     # --- Page numbering from page 2 ---
     _setup_page_numbering(doc, config)
