@@ -1,0 +1,74 @@
+{
+  "baserow": {
+    "tables": {
+      "employees": null,
+      "shift_schedule": null,
+      "tasks": null,
+      "plan_items": null,
+      "regulatory_tracks": null,
+      "task_log": null,
+      "skill_updates": null,
+      "settings": null
+    }
+  },
+
+  "schedule": {
+    "owner_work_hours": {
+      "mon_thu": {"start": "09:00", "end": "18:00"},
+      "fri": {"start": "09:00", "end": "16:20"},
+      "sat_sun": null
+    },
+    "briefing_time": "09:00",
+    "push_time": {
+      "mon_thu": "17:00",
+      "fri": "15:00"
+    },
+    "anomaly_check_times": ["10:00", "14:00"],
+    "briefing_days": ["mon", "tue", "wed", "thu", "fri"],
+    "push_days": ["mon", "tue", "wed", "thu", "fri"]
+  },
+
+  "shifts": {
+    "day": {"start": "08:00", "end": "20:00"},
+    "night": {"start": "20:00", "end": "08:00"},
+    "cycle": ["day", "night", "rest", "off"]
+  },
+
+  "defaults": {
+    "deadline_shift": "end_of_shift",
+    "deadline_office": "end_of_business_day",
+    "priority": "normal"
+  },
+
+  "analytics": {
+    "overload_multiplier": 2.0,
+    "chronic_overdue_rate": 0.30,
+    "chronic_overdue_window_days": 14,
+    "performance_drop_threshold": 0.50,
+    "shift_imbalance_ratio": 3.0,
+    "stale_task_multiplier": 3.0
+  },
+
+  "report": {
+    "columns": [
+      "№ п/п",
+      "Мероприятия",
+      "Сроки проведения",
+      "Ответственный",
+      "Отметка о выполнении"
+    ],
+    "approval_header": "УТВЕРЖДАЮ",
+    "font_name": "Times New Roman",
+    "font_size_pt": 14,
+    "page": {
+      "width_cm": 21.0,
+      "height_cm": 29.7,
+      "margin_left_cm": 3.0,
+      "margin_right_cm": 1.0,
+      "margin_top_cm": 2.0,
+      "margin_bottom_cm": 2.0
+    }
+  },
+
+  "work_dir": "/dev/shm/task-control"
+}
