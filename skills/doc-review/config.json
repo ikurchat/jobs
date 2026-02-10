@@ -1,0 +1,102 @@
+{
+  "formatting": {
+    "font_name": "Times New Roman",
+    "font_size_pt": 14,
+    "alignment": "justify",
+    "line_spacing": 1.15,
+    "first_line_indent_cm": 1.25,
+    "space_after_pt": 0,
+    "space_before_pt": 0
+  },
+
+  "page": {
+    "width_cm": 21.0,
+    "height_cm": 29.7,
+    "margin_left_cm": 3.0,
+    "margin_right_cm": 1.0,
+    "margin_top_cm": 2.0,
+    "margin_bottom_cm": 2.0
+  },
+
+  "structure": {
+    "header": {
+      "type": "table",
+      "rows": 1,
+      "cols": 2,
+      "borders": false,
+      "left_cell": "title",
+      "right_cell": "addressee"
+    },
+    "body": {
+      "blocks": ["resume", "details", "conclusions"],
+      "separator": "empty_paragraph",
+      "visible_subheaders": false
+    },
+    "appendix": {
+      "type": "table",
+      "rows": 1,
+      "cols": 2,
+      "borders": false,
+      "left_cell_text": "Приложение:",
+      "right_cell_format": "numbered_list"
+    },
+    "signature": {
+      "type": "table",
+      "rows": 1,
+      "cols": 2,
+      "borders": false,
+      "left_cell": "position",
+      "right_cell": "initials_surname",
+      "grid_ratio": [62, 38],
+      "right_cell_spaces": 18,
+      "right_cell_jc": "center",
+      "right_cell_first_line": 567,
+      "cell_margins": 0
+    },
+    "footer": {
+      "format": "two_lines",
+      "content_template": "{executor_name}\n{executor_phone}",
+      "font_size_pt": 12,
+      "line_spacing": "single",
+      "placement": "body",
+      "placement_note": "executor block goes in document body after signature, NOT in page footer"
+    }
+  },
+
+  "page_numbering": {
+    "enabled": true,
+    "start_from_page": 2,
+    "position": "center",
+    "font_size_pt": 14,
+    "different_first_page": true
+  },
+
+  "thresholds": {
+    "rewrite_format_issues": 5,
+    "rewrite_content_issues": 3,
+    "max_versions": 10
+  },
+
+  "versioning": {
+    "pattern": "{base_name}_v{version}",
+    "initial_version": 1
+  },
+
+  "encryption": {
+    "password_env_var": "DOC_DEFAULT_PASSWORD"
+  },
+
+  "pdf_conversion": {
+    "command": "libreoffice",
+    "args": ["--headless", "--norestore", "--convert-to", "pdf", "--outdir"],
+    "timeout_seconds": 120
+  },
+
+  "work_dir": "/dev/shm/doc-review",
+
+  "analysis": {
+    "tolerance_pt": 0.5,
+    "tolerance_cm": 0.1,
+    "max_file_size_mb": 50
+  }
+}
