@@ -4,13 +4,14 @@ description: Use this skill to create a Yandex Telemost video meeting link. Trig
 tools: Read, Bash
 ---
 
-# Create Telemost
-
-## Algorithm
-
 # Create Telemost Link
 
 Создание ссылки на видеовстречу в Яндекс Телемост. Браузер уже авторизован под аккаунтом Яндекс.
+
+## Когда НЕ активировать
+
+- Встречи в Zoom, Google Meet, Teams (только Яндекс Телемост)
+- Просто обсуждение расписания без создания встречи
 
 ## Algorithm
 

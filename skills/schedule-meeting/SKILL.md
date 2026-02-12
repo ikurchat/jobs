@@ -8,6 +8,12 @@ tools: mcp__jobs__resolve_user, mcp__jobs__create_task, mcp__jobs__send_to_user,
 
 Согласование встречи с пользователем через cross-session communication.
 
+## Когда НЕ активировать
+
+- Создание ссылки на Телемост без согласования (это create-telemost)
+- Напоминания без согласования с другим человеком
+- Управление задачами (это task-control)
+
 **Переменные:**
 - `{owner_username}` — @username владельца из системного промпта (Owner Telegram ID)
 
