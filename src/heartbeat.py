@@ -242,7 +242,7 @@ class HeartbeatRunner:
         active = await repo.list_tasks(include_done=False)
 
         from datetime import timedelta
-        now = datetime.now(tz=settings.get_timezone())
+        now = datetime.now()
         cutoff = now + timedelta(hours=24)
         upcoming = [t for t in active if t.deadline and not t.is_overdue and t.deadline <= cutoff]
 
