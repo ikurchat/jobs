@@ -1,11 +1,14 @@
 services:
   jobs:
     build: .
+    init: true                        # tini as PID 1 — reaps zombie processes
     env_file: .env
     environment:
       - TZ=${TZ:-Europe/Moscow}
       - HOME=/home/jobs
       - BROWSER_CDP_URL=http://browser:9223
+      - BASEROW_URL=${BASEROW_URL}
+      - BASEROW_TOKEN=${BASEROW_TOKEN}
     volumes:
       - ./data:/data              # Персистентные данные (сессия, БД)
       - ./data/.claude:/home/jobs/.claude  # Claude Code credentials

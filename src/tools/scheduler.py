@@ -174,7 +174,7 @@ class SchedulerRunner:
             # Для repeating: сдвигаем schedule_at ВПЕРЁД ДО выполнения
             # (защита от двойного срабатывания)
             if task.schedule_repeat:
-                next_at = datetime.now() + timedelta(seconds=task.schedule_repeat)
+                next_at = datetime.now(_tz) + timedelta(seconds=task.schedule_repeat)
                 await repo.update_schedule(task.id, next_at)
                 logger.info(f"Rescheduled [{task.id}] to {next_at.strftime('%H:%M')}")
             else:

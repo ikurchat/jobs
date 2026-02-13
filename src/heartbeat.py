@@ -215,7 +215,7 @@ class HeartbeatRunner:
             # Формируем напоминание
             task_lines = []
             for task in tasks[:3]:  # Максимум 3 задачи в напоминании
-                days = (datetime.now(tz=settings.get_timezone()) - task.deadline).days if task.deadline else 0
+                days = (datetime.now(tz=task.deadline.tzinfo or settings.get_timezone()) - task.deadline).days if task.deadline else 0
                 task_lines.append(f"• {task.title[:50]} (просрочено {days} дн.)")
 
             reminder = "Напоминание о просроченных задачах:\n\n" + "\n".join(task_lines)

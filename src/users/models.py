@@ -77,7 +77,8 @@ class Task:
     def is_overdue(self) -> bool:
         """Просрочена ли задача."""
         if self.deadline and self.status not in ("done", "cancelled"):
-            return datetime.now() > self.deadline
+            now = datetime.now(tz=self.deadline.tzinfo) if self.deadline.tzinfo else datetime.now()
+            return now > self.deadline
         return False
 
     @property
