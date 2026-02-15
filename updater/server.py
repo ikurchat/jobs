@@ -4,9 +4,12 @@ Updater HTTP server — проверка и применение обновле�
 Работает напрямую с хостовым git-репозиторием (COMPOSE_DIR),
 без отдельного клона. docker compose build/up из той же директории.
 
-Endpoints:
-  GET  /check  — fetch + сравнение HEAD vs origin/main
-  POST /update — pull + build + restart
+Dual-remote strategy:
+  upstream = qanelph/jobs  (основной репо, источник обновлений)
+  origin   = ikurchat/jobs (форк, кастомные изменения)
+
+/check   — fetch upstream + сравнение HEAD vs upstream/main
+/update  — fetch upstream + merge + build + restart
 """
 
 import json
@@ -16,6 +19,11 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 COMPOSE_DIR = os.environ.get("COMPOSE_DIR", "")
 BRANCH = "main"
+
+# Upstream = основной репо (источник обновлений)
+UPSTREAM_REMOTE = "upstream"
+# Origin = форк (кастомные изменения, для /check показываем оба)
+ORIGIN_REMOTE = "origin"
 
 
 def _configure_git() -> None:
@@ -33,34 +41,126 @@ def run(cmd: list[str], cwd: str | None = None) -> subprocess.CompletedProcess[s
     return result
 
 
-def check_updates() -> dict:
-    run(["git", "fetch", "origin", BRANCH], cwd=COMPOSE_DIR)
+def _try_run(cmd: list[str], cwd: str | None = None) -> subprocess.CompletedProcess[str] | None:
+    """Run command, return None on failure instead of raising."""
+    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=600)
+    return result if result.returncode == 0 else None
 
-    current = run(["git", "rev-parse", "HEAD"], cwd=COMPOSE_DIR).stdout.strip()
-    latest = run(["git", "rev-parse", f"origin/{BRANCH}"], cwd=COMPOSE_DIR).stdout.strip()
 
+def _get_new_commits(base: str, target: str) -> list[dict[str, str]]:
+    """Get list of commits between base..target."""
     commits: list[dict[str, str]] = []
-    if current != latest:
-        log = run(
-            ["git", "log", "--oneline", f"{current}..{latest}"],
-            cwd=COMPOSE_DIR,
-        ).stdout.strip()
-        for line in log.splitlines():
+    if base == target:
+        return commits
+    result = _try_run(
+        ["git", "log", "--oneline", f"{base}..{target}"],
+        cwd=COMPOSE_DIR,
+    )
+    if result and result.stdout.strip():
+        for line in result.stdout.strip().splitlines():
             if line:
                 hash_, _, message = line.partition(" ")
                 commits.append({"hash": hash_, "message": message})
+    return commits
 
-    return {"current": current, "latest": latest, "commits": commits}
+
+def check_updates() -> dict:
+    """Fetch upstream and origin, report new commits from both."""
+    current = run(["git", "rev-parse", "HEAD"], cwd=COMPOSE_DIR).stdout.strip()
+
+    # Fetch upstream (qanelph/jobs)
+    upstream_commits: list[dict[str, str]] = []
+    upstream_latest = current
+    try:
+        run(["git", "fetch", UPSTREAM_REMOTE, BRANCH], cwd=COMPOSE_DIR)
+        upstream_latest = run(
+            ["git", "rev-parse", f"{UPSTREAM_REMOTE}/{BRANCH}"],
+            cwd=COMPOSE_DIR,
+        ).stdout.strip()
+        upstream_commits = _get_new_commits(current, upstream_latest)
+    except RuntimeError:
+        pass  # upstream may not be configured
+
+    # Fetch origin (ikurchat/jobs)
+    origin_commits: list[dict[str, str]] = []
+    origin_latest = current
+    try:
+        run(["git", "fetch", ORIGIN_REMOTE, BRANCH], cwd=COMPOSE_DIR)
+        origin_latest = run(
+            ["git", "rev-parse", f"{ORIGIN_REMOTE}/{BRANCH}"],
+            cwd=COMPOSE_DIR,
+        ).stdout.strip()
+        origin_commits = _get_new_commits(current, origin_latest)
+    except RuntimeError:
+        pass  # origin may not be configured
+
+    # Combined: any new commits from either source
+    all_commits = upstream_commits + [
+        c for c in origin_commits
+        if c["hash"] not in {uc["hash"] for uc in upstream_commits}
+    ]
+
+    return {
+        "current": current,
+        "upstream_latest": upstream_latest,
+        "origin_latest": origin_latest,
+        "commits": all_commits,
+        "upstream_commits": len(upstream_commits),
+        "origin_commits": len(origin_commits),
+    }
 
 
 def apply_update() -> dict:
-    # Запоминаем tree-hash browser/ до pull
+    """Merge upstream/main into local, then build + restart."""
+    # Запоминаем tree-hash browser/ до merge
     old_browser = run(
         ["git", "rev-parse", "HEAD:browser"],
         cwd=COMPOSE_DIR,
     ).stdout.strip()
 
-    run(["git", "pull", "origin", BRANCH], cwd=COMPOSE_DIR)
+    merged_from: list[str] = []
+
+    # 1. Merge upstream (qanelph/jobs) — основные обновления
+    try:
+        run(["git", "fetch", UPSTREAM_REMOTE, BRANCH], cwd=COMPOSE_DIR)
+        current = run(["git", "rev-parse", "HEAD"], cwd=COMPOSE_DIR).stdout.strip()
+        upstream_head = run(
+            ["git", "rev-parse", f"{UPSTREAM_REMOTE}/{BRANCH}"],
+            cwd=COMPOSE_DIR,
+        ).stdout.strip()
+
+        if current != upstream_head:
+            run(
+                ["git", "merge", f"{UPSTREAM_REMOTE}/{BRANCH}", "--no-edit"],
+                cwd=COMPOSE_DIR,
+            )
+            merged_from.append("upstream")
+    except RuntimeError as e:
+        # If merge conflict — abort and report
+        _try_run(["git", "merge", "--abort"], cwd=COMPOSE_DIR)
+        raise RuntimeError(f"upstream merge failed: {e}")
+
+    # 2. Merge origin (ikurchat/jobs) — форковые обновления
+    try:
+        run(["git", "fetch", ORIGIN_REMOTE, BRANCH], cwd=COMPOSE_DIR)
+        current = run(["git", "rev-parse", "HEAD"], cwd=COMPOSE_DIR).stdout.strip()
+        origin_head = run(
+            ["git", "rev-parse", f"{ORIGIN_REMOTE}/{BRANCH}"],
+            cwd=COMPOSE_DIR,
+        ).stdout.strip()
+
+        if current != origin_head:
+            run(
+                ["git", "merge", f"{ORIGIN_REMOTE}/{BRANCH}", "--no-edit"],
+                cwd=COMPOSE_DIR,
+            )
+            merged_from.append("origin")
+    except RuntimeError as e:
+        _try_run(["git", "merge", "--abort"], cwd=COMPOSE_DIR)
+        raise RuntimeError(f"origin merge failed: {e}")
+
+    if not merged_from:
+        return {"ok": True, "message": "already up to date"}
 
     new_browser = run(
         ["git", "rev-parse", "HEAD:browser"],
@@ -75,7 +175,7 @@ def apply_update() -> dict:
     run(["docker", "compose", "build"] + services, cwd=COMPOSE_DIR)
     run(["docker", "compose", "up", "-d"] + services, cwd=COMPOSE_DIR)
 
-    return {"ok": True}
+    return {"ok": True, "merged_from": merged_from}
 
 
 class Handler(BaseHTTPRequestHandler):
