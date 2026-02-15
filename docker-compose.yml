@@ -29,14 +29,15 @@ services:
       - TZ=${TZ:-Europe/Moscow}
       - RESOLUTION=1920x1080x24
       - HTTP_PROXY=${HTTP_PROXY:-}
+      - VNC_PASSWORD=${VNC_PASSWORD:-}  # Set to enable VNC auth (empty = no password)
     volumes:
       - browser-profile:/home/browser/.config/chromium  # Персистентный профиль
       - browser-downloads:/home/browser/Downloads       # Скачанные файлы
       - browser-recordings:/recordings                  # Аудио-записи (10-мин чанки)
       - browser-control:/browser-control                # Управление из jobs (proxy toggle)
     ports:
-      - "127.0.0.1:6080:6080"    # noVNC — только localhost (SSH tunnel для доступа)
-      - "127.0.0.1:9223:9223"    # CDP — только localhost (внутри docker network и через tunnel)
+      - "127.0.0.1:6080:6080"    # noVNC — localhost only (use SSH tunnel or reverse proxy)
+      - "127.0.0.1:9223:9223"    # CDP — localhost only (containers use docker network)
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9223/json"]
