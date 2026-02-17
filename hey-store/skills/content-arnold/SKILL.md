@@ -23,7 +23,8 @@ tools: read, bash, web_search
 5. Загрузи голос из `knowledge/brand-voice.md`
 6. Загрузи шаблон из `templates/`
 7. Сгенерируй черновик
-8. Сохрани в `outputs/drafts/YYYY-MM-DD_рубрика.md`
+8. Если пост выиграет от картинки — сгенерируй через Imagen (см. раздел "Генерация картинок")
+9. Сохрани в `outputs/drafts/YYYY-MM-DD_рубрика.md`
 
 Формат черновика:
 
@@ -97,6 +98,56 @@ tools: read, bash, web_search
 | source | text | Источник |
 | product | single_select | Связанный продукт |
 | notes | long_text | Заметки оператора |
+
+## Генерация картинок
+
+Модель: **Imagen** (gemini-2.0-flash-preview-image-generation) через Google AI Studio.
+Ключ: `GOOGLE_API_KEY` (уже в окружении).
+
+### Когда генерировать
+- Посты-сравнения (инфографика/таблица в виде картинки)
+- Кейсы (иллюстрация ситуации)
+- Гайды (пошаговая визуалка)
+- По явной просьбе оператора
+
+НЕ генерировать для коротких новостей, промо, и когда нет визуальной идеи.
+
+### Как генерировать
+
+```bash
+python3 -c "
+from google import genai
+from google.genai import types
+import base64, os
+
+client = genai.Client(api_key=os.environ['GOOGLE_API_KEY'])
+response = client.models.generate_content(
+    model='gemini-2.0-flash-preview-image-generation',
+    contents='ПРОМПТ_КАРТИНКИ',
+    config=types.GenerateContentConfig(response_modalities=['TEXT', 'IMAGE'])
+)
+for part in response.candidates[0].content.parts:
+    if part.inline_data:
+        with open('OUTPUT_PATH.png', 'wb') as f:
+            f.write(base64.b64decode(part.inline_data.data))
+        print('saved')
+"
+```
+
+### Правила промптов для картинок
+- Стиль: минималистичный, flat design, корпоративный
+- Цвета: палитра Hey Store (синий, белый, акцентный оранжевый)
+- БЕЗ текста на картинках (текст добавляется в посте)
+- БЕЗ лиц реальных людей
+- Промпт на английском (лучше качество)
+
+### Формат черновика с картинкой
+
+В мета-блоке добавлять:
+```
+- Картинка: outputs/drafts/YYYY-MM-DD_рубрика.png
+- Промпт картинки: [английский промпт]
+```
 
 ## Правила контента
 
