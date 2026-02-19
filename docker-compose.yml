@@ -9,6 +9,8 @@ services:
       - BROWSER_CDP_URL=http://browser:9223
       - BASEROW_URL=${BASEROW_URL}
       - BASEROW_TOKEN=${BASEROW_TOKEN}
+      - GMAIL_EMAIL=${GMAIL_EMAIL}
+      - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD}
     volumes:
       - ./data:/data              # Персистентные данные (сессия, БД)
       - ./data/.claude:/home/jobs/.claude  # Claude Code credentials

@@ -641,6 +641,22 @@ class TelegramHandlers:
             except Exception as e:
                 logger.error(f"Photo save failed: {e}")
 
+        # Видеосообщение (кружочек)
+        elif message.video_note:
+            try:
+                vn_data = await self._client.download_media(message.video_note, bytes)
+                result = await transcribe_audio(vn_data)
+                media_context = f"[Видеосообщение (кружочек)]: {result.text}"
+                logger.info(f"Video note transcribed: {result.text[:50]}...")
+            except Exception as e:
+                logger.error(f"Video note transcription failed: {e}")
+                media_context = f"[Видеосообщение — ошибка транскрипции: {e}]"
+
+        # Стикер
+        elif message.sticker:
+            emoji = message.sticker.alt or ""
+            media_context = f"[Стикер: {emoji}]" if emoji else "[Стикер]"
+
         # Документ (включая видео, аудио файлы)
         elif message.document:
             try:

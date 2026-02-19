@@ -1,5 +1,6 @@
 ---
 name: osint
+disable-model-invocation: true
 description: >
   Use this skill when the user asks to look up, investigate, or gather intelligence
   about a person, phone number, username, email, vehicle, address, domain, or photo.
