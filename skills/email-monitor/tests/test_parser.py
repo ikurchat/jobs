@@ -24,8 +24,8 @@ def test_extract_deadlines():
 def test_extract_people():
     email = {
         "subject": "По задаче",
-        "body_text": "Ответственный — Кулиш А.В. Согласовать с Меликяном Д.А.",
-        "body_preview": "Ответственный — Кулиш А.В.",
+        "body_text": "Ответственный — Сидоров А.В. Согласовать с Козловым Д.А.",
+        "body_preview": "Ответственный — Сидоров А.В.",
         "sender": "test@test.ru",
         "sender_name": "Test",
     }
@@ -63,7 +63,7 @@ def test_summary_format():
         "body_text": "Подготовить отчёт до завтра",
         "body_preview": "Подготовить отчёт до завтра",
         "sender": "boss@company.ru",
-        "sender_name": "Модестов А.В.",
+        "sender_name": "Громов А.В.",
         "priority": "critical",
         "category": "task",
         "proposed_action": "create_task",
@@ -71,7 +71,7 @@ def test_summary_format():
     }
     result = generate_summary(email)
     assert "summary_text" in result
-    assert "Модестов" in result["summary_text"]
+    assert "Громов" in result["summary_text"]
 
 
 if __name__ == "__main__":

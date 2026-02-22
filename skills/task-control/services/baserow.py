@@ -13,6 +13,7 @@ if _shared not in sys.path:
     sys.path.insert(0, _shared)
 
 from baserow import (  # noqa: E402, F401
+    _make_request,
     list_rows,
     list_all_rows,
     get_row,
@@ -26,6 +27,8 @@ from baserow import (  # noqa: E402, F401
     output_json,
     output_error,
     main,
+    MAX_RETRIES,
+    BACKOFF_BASE,
 )
 
 if __name__ == "__main__":

@@ -112,7 +112,7 @@ _SAVE_EXTENSIONS = {".docx", ".xlsx", ".pdf", ".zip", ".doc", ".xls", ".pptx", "
 _SKIP_EXTENSIONS = {".png", ".gif", ".jpg", ".jpeg", ".bmp", ".webp", ".ico", ".svg"}
 _ATTACHMENTS_DIR = Path("/dev/shm/email-monitor/attachments")
 _ENCRYPTED_DOCX_MAGIC = b"\xd0\xcf\x11\xe0"
-_DECRYPT_PASSWORD = "favl9xfr7"
+_DECRYPT_PASSWORD = os.environ.get("DOCX_DECRYPT_PASSWORD", "")
 
 
 def _save_attachment(part: email.message.Message, filename: str, uid: str) -> Optional[str]:

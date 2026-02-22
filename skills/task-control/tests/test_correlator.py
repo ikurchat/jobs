@@ -43,7 +43,7 @@ class TestFormatPrompt:
         task = {
             "title": "Проверить агенты EDR на серверах",
             "description": "Убедиться что агенты EDR подключены на всех серверах",
-            "assignee_fio": "Кулиш Андрей Сергеевич",
+            "assignee_fio": "Сидоров Алексей Сергеевич",
             "task_type": "delegate",
         }
 
@@ -72,7 +72,7 @@ class TestFormatPrompt:
         task = {
             "title": "Контроль агентов EDR",
             "description": "Проверка подключения EDR агентов",
-            "assignee_fio": "Кулиш",
+            "assignee_fio": "Сидоров",
         }
         result = format_correlation_prompt(task, sample_plan_items)
 

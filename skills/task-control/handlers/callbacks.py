@@ -124,8 +124,8 @@ def parse_status_update(text: str) -> dict:
     """Parse natural language status update.
 
     Examples:
-        "Кулиш сдал справку по PT" → {assignee_hint: "Кулиш", action: "done", task_hint: "справка по PT"}
-        "Меликян просит ещё 2 дня" → {assignee_hint: "Меликян", action: "deadline_move", detail: "2 дня"}
+        "Сидоров сдал справку по PT" → {assignee_hint: "Сидоров", action: "done", task_hint: "справка по PT"}
+        "Козлов просит ещё 2 дня" → {assignee_hint: "Козлов", action: "deadline_move", detail: "2 дня"}
         "Снимаю задачу по SOAR" → {action: "cancel", task_hint: "SOAR"}
     """
     lower = text.strip().lower()

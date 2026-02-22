@@ -1,11 +1,11 @@
 {
   "vip_senders": {
-    "modestov": {
-      "patterns": ["модестов", "modestov"],
+    "vip_boss": {
+      "patterns": ["громов", "gromov"],
       "email_patterns": [],
       "priority": "critical",
       "priority_score": 10,
-      "note": "Руководитель. Всё от него — максимальный приоритет.",
+      "note": "Руководитель. Всё от него — максимальный приоритет. Замените patterns на реальные.",
       "sed_override": {
         "default_priority": "high",
         "with_control_keywords": "critical",

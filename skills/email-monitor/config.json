@@ -1,6 +1,6 @@
 {
   "gmail": {
-    "email": "dedkubus@gmail.com",
+    "email_env": "GMAIL_EMAIL",
     "imap_host": "imap.gmail.com",
     "imap_port": 993,
     "fetch_limit": 20,

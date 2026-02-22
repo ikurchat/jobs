@@ -96,7 +96,7 @@ def build_plan(
         items.append(PlanItem(
             description=desc,
             deadline=_format_deadline(dl),
-            responsible=track.get("responsible", "Ярочкий Д.А."),
+            responsible=track.get("responsible", "Петров Д.А."),
         ))
         existing_descs.add(desc.lower())
 

@@ -2,7 +2,7 @@ from enum import Enum
 
 
 class Priority(str, Enum):
-    CRITICAL = "critical"     # 9-10: Модестов, срочные поручения
+    CRITICAL = "critical"     # 9-10: VIP-руководитель, срочные поручения
     HIGH = "high"             # 7-8: контроль, сроки, важные отправители
     MEDIUM = "medium"         # 4-6: рабочая переписка
     LOW = "low"               # 1-3: информационные, рассылки

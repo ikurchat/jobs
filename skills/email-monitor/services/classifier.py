@@ -116,7 +116,7 @@ def classify_email(email_data: dict, feedback_history: list | None = None) -> di
     # 3. Категория
     category = _detect_category(email_data, config)
 
-    # 4. VIP-буст (Модестов и другие)
+    # 4. VIP-буст (руководитель и другие)
     if is_vip and vip_data:
         if category == Category.SED and vip_data.get("sed_override"):
             if _has_control_keywords(text, config):

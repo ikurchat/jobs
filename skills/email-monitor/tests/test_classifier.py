@@ -8,11 +8,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from services.classifier import classify_email, classify_batch
 
 
-def test_modestov_critical():
-    """Письмо от Модестова = critical."""
+def test_gromov_critical():
+    """Письмо от Громова = critical."""
     email = {
-        "sender": "modestov@company.ru",
-        "sender_name": "Модестов А.В.",
+        "sender": "gromov@company.ru",
+        "sender_name": "Громов А.В.",
         "subject": "Поручение по результатам совещания",
         "body_preview": "Прошу подготовить справку по инциденту до 20.02.2026",
     }
@@ -22,11 +22,11 @@ def test_modestov_critical():
     assert result["priority_score"] >= 9
 
 
-def test_modestov_sed_without_control():
-    """СЭД от Модестова без контрольных слов = high, не medium."""
+def test_gromov_sed_without_control():
+    """СЭД от Громова без контрольных слов = high, не medium."""
     email = {
         "sender": "sed@company.ru",
-        "sender_name": "Модестов (СЭД)",
+        "sender_name": "Громов (СЭД)",
         "subject": "Информационное письмо",
         "body_preview": "Направляю для сведения документ",
     }
@@ -35,11 +35,11 @@ def test_modestov_sed_without_control():
     assert result["priority"] in ("critical", "high")
 
 
-def test_modestov_sed_with_control():
-    """СЭД от Модестова с контролем/сроками = critical."""
+def test_gromov_sed_with_control():
+    """СЭД от Громова с контролем/сроками = critical."""
     email = {
         "sender": "sed@company.ru",
-        "sender_name": "Модестов (СЭД)",
+        "sender_name": "Громов (СЭД)",
         "subject": "На контроле: исполнение поручения",
         "body_preview": "Срок исполнения до 25.02.2026. Прошу доложить.",
     }
@@ -103,21 +103,21 @@ def test_batch_sort():
     emails = [
         {"sender": "info@newsletter.com", "sender_name": "", "subject": "News",
          "body_preview": "unsubscribe from newsletter"},
-        {"sender": "modestov@company.ru", "sender_name": "Модестов",
+        {"sender": "gromov@company.ru", "sender_name": "Громов",
          "subject": "Срочно", "body_preview": "Немедленно доложить"},
         {"sender": "user@company.ru", "sender_name": "Обычный",
          "subject": "Вопрос", "body_preview": "Подскажите пожалуйста"},
     ]
     result = classify_batch(emails)
-    # Модестов должен быть первым
-    assert result[0]["sender_name"] == "Модестов"
+    # Громов должен быть первым
+    assert result[0]["sender_name"] == "Громов"
     assert result[0]["priority_score"] >= 9
 
 
 if __name__ == "__main__":
-    test_modestov_critical()
-    test_modestov_sed_without_control()
-    test_modestov_sed_with_control()
+    test_gromov_critical()
+    test_gromov_sed_without_control()
+    test_gromov_sed_with_control()
     test_newsletter_low()
     test_incident_high()
     test_feedback_learning()

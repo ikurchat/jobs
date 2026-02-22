@@ -19,7 +19,7 @@ from services.parser import (
 class TestValidation:
     def test_valid_tasks(self):
         tasks = [
-            {"title": "Справка по PT", "task_type": "delegate", "assignee_hint": "Кулиш"},
+            {"title": "Справка по PT", "task_type": "delegate", "assignee_hint": "Сидоров"},
             {"title": "Изучить договор", "task_type": "personal"},
         ]
         result = validate_tasks(tasks)
@@ -27,7 +27,7 @@ class TestValidation:
         assert len(result["errors"]) == 0
 
     def test_missing_title(self):
-        tasks = [{"task_type": "delegate", "assignee_hint": "Кулиш"}]
+        tasks = [{"task_type": "delegate", "assignee_hint": "Сидоров"}]
         result = validate_tasks(tasks)
         assert len(result["valid"]) == 0
         assert len(result["errors"]) == 1
@@ -53,15 +53,15 @@ class TestValidation:
     def test_10_task_meeting_example(self):
         """Validate the 10-task meeting example from ТЗ."""
         tasks = [
-            {"title": "Справка по PT", "task_type": "delegate", "assignee_hint": "Кулиш"},
-            {"title": "Отчёты: добавить страны атак", "task_type": "delegate", "assignee_hint": "Меликян"},
+            {"title": "Справка по PT", "task_type": "delegate", "assignee_hint": "Сидоров"},
+            {"title": "Отчёты: добавить страны атак", "task_type": "delegate", "assignee_hint": "Козлов"},
             {"title": "Справка по ГосСОПКА", "task_type": "delegate", "assignee_hint": "?"},
-            {"title": "Справка по Булычеву", "task_type": "collab"},
-            {"title": "Справка по Павлову", "task_type": "collab"},
+            {"title": "Справка по Васильеву", "task_type": "collab"},
+            {"title": "Справка по Фёдорову", "task_type": "collab"},
             {"title": "Аббревиатуры — сначала полностью", "task_type": "skill_update"},
             {"title": "Фактура в приложении", "task_type": "skill_update"},
             {"title": "ИНН обязательно для юрлиц", "task_type": "skill_update"},
-            {"title": "Изучить договор с Киберзащитой", "task_type": "personal"},
+            {"title": "Изучить договор с Вендором-SOAR", "task_type": "personal"},
             {"title": "Перекрёстная аналитика отчётов СОК", "task_type": "backlog"},
         ]
         result = validate_tasks(tasks)
@@ -73,15 +73,15 @@ class TestValidation:
 class TestEnrichment:
     def test_fio_matching(self, sample_employees):
         tasks = [
-            {"title": "Task 1", "task_type": "delegate", "assignee_hint": "Кулиш"},
+            {"title": "Task 1", "task_type": "delegate", "assignee_hint": "Сидоров"},
         ]
         result = enrich_tasks(tasks, sample_employees)
         assert result[0]["assignee"] == 3
-        assert "Кулиш" in result[0]["assignee_fio"]
+        assert "Сидоров" in result[0]["assignee_fio"]
 
     def test_partial_name_match(self, sample_employees):
         tasks = [
-            {"title": "Task 1", "task_type": "delegate", "assignee_hint": "Меликян"},
+            {"title": "Task 1", "task_type": "delegate", "assignee_hint": "Козлов"},
         ]
         result = enrich_tasks(tasks, sample_employees)
         assert result[0]["assignee"] == 4
@@ -102,7 +102,7 @@ class TestEnrichment:
 
     def test_owner_action_set(self, sample_employees):
         tasks = [
-            {"title": "Delegate", "task_type": "delegate", "assignee_hint": "Кулиш"},
+            {"title": "Delegate", "task_type": "delegate", "assignee_hint": "Сидоров"},
         ]
         result = enrich_tasks(tasks, sample_employees)
         assert result[0]["owner_action"] == "delegate"

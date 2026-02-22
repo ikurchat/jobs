@@ -46,22 +46,22 @@ def sample_employees():
         },
         {
             "id": 3,
-            "fio": "Кулиш Андрей Сергеевич",
+            "fio": "Сидоров Алексей Сергеевич",
             "position": "Ведущий специалист",
             "schedule_type": "office_5x2",
             "zone": "Документооборот, справки ИБ",
             "strengths": "Подготовка справок, работа с регуляторами",
-            "telegram": "@kulish",
+            "telegram": "@sidorov",
             "active": True,
         },
         {
             "id": 4,
-            "fio": "Меликян Арам Ашотович",
+            "fio": "Козлов Артём Андреевич",
             "position": "Специалист",
             "schedule_type": "office_5x2",
             "zone": "Отчётность, аналитика",
             "strengths": "Работа с данными, отчёты",
-            "telegram": "@melikyan",
+            "telegram": "@kozlov",
             "active": True,
         },
     ]
@@ -76,7 +76,7 @@ def sample_tasks():
             "title": "Справка по PT",
             "task_type": "delegate",
             "control_loop": "down",
-            "assignee": [{"id": 3, "value": "Кулиш Андрей Сергеевич"}],
+            "assignee": [{"id": 3, "value": "Сидоров Алексей Сергеевич"}],
             "status": "done",
             "priority": "high",
             "source_date": "2025-02-05",
@@ -92,7 +92,7 @@ def sample_tasks():
             "title": "Отчёты: добавить страны атак",
             "task_type": "delegate",
             "control_loop": "down",
-            "assignee": [{"id": 4, "value": "Меликян Арам Ашотович"}],
+            "assignee": [{"id": 4, "value": "Козлов Артём Андреевич"}],
             "status": "in_progress",
             "priority": "normal",
             "source_date": "2025-02-09",
@@ -115,7 +115,7 @@ def sample_tasks():
         },
         {
             "id": 104,
-            "title": "Справка по Булычеву",
+            "title": "Справка по Васильеву",
             "task_type": "collab",
             "control_loop": "down",
             "status": "waiting_input",
@@ -146,7 +146,7 @@ def sample_tasks():
         },
         {
             "id": 107,
-            "title": "Изучить договор с Киберзащитой на SOAR",
+            "title": "Изучить договор с Вендором-SOAR на SOAR",
             "task_type": "personal",
             "control_loop": "internal",
             "status": "assigned",
@@ -219,7 +219,7 @@ def sample_plan_items():
             "item_number": 13,
             "description": "Контроль корректного функционирования СЗИ KATAP, подключение агентов EDR",
             "deadline": "Февраль 2025",
-            "responsible": [{"id": 3, "value": "Кулиш"}],
+            "responsible": [{"id": 3, "value": "Сидоров"}],
             "status": "in_progress",
         },
     ]
@@ -228,7 +228,11 @@ def sample_plan_items():
 @pytest.fixture
 def mock_baserow():
     """Mock for Baserow API calls."""
-    with patch("services.baserow._make_request") as mock:
+    # _make_request lives in shared/baserow.py; patch it there so all callers see it
+    import importlib
+    import services.baserow as sb
+    shared_mod = importlib.import_module("baserow")
+    with patch.object(shared_mod, "_make_request") as mock:
         yield mock
 
 

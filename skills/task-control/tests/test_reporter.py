@@ -26,7 +26,7 @@ def plan_data():
         "period_end": "09.02.2025",
         "approver_name": "Иванов И.И.",
         "approver_position": "Директор по безопасности",
-        "signer_name": "Панков И.Ю.",
+        "signer_name": "Смирнов И.Ю.",
         "signer_position": "Начальник отдела ИБ",
         "title": "ПЛАН мероприятий ЦОК на 03.02–09.02.2025",
         "items": [
@@ -44,9 +44,9 @@ def plan_data():
             },
             {
                 "item_number": 3,
-                "description": "Совещание с КРОК",
+                "description": "Совещание с Интегратор",
                 "deadline": "10.02",
-                "responsible": "Панков И.Ю.",
+                "responsible": "Смирнов И.Ю.",
             },
         ],
     }
@@ -68,16 +68,16 @@ def unplanned_data():
         "items": [
             {
                 "item_number": 1,
-                "description": "Справка по Булычеву",
+                "description": "Справка по Васильеву",
                 "deadline": "09.02–13.02",
-                "responsible": "Панков И.Ю.",
+                "responsible": "Смирнов И.Ю.",
                 "completion_note": "Выполнено.",
             },
             {
                 "item_number": 2,
-                "description": "Изучение договора с Киберзащитой",
+                "description": "Изучение договора с Вендором-SOAR",
                 "deadline": "09.02–13.02",
-                "responsible": "Панков И.Ю.",
+                "responsible": "Смирнов И.Ю.",
                 "completion_note": "В работе.",
             },
         ],
@@ -117,7 +117,7 @@ class TestWeeklyPlan:
 
         assert "Мониторинг инцидентов ИБ" in table_text
         assert "Ретроспективный анализ" in table_text
-        assert "Совещание с КРОК" in table_text
+        assert "Совещание с Интегратор" in table_text
 
     def test_has_approval_header(self, plan_data, tmp_work_dir, config):
         output = str(tmp_work_dir / "plan.docx")
@@ -167,8 +167,8 @@ class TestReportWithUnplanned:
                 for cell in row.cells:
                     all_text += cell.text + " "
 
-        assert "Справка по Булычеву" in all_text
-        assert "Киберзащитой" in all_text
+        assert "Справка по Васильеву" in all_text
+        assert "Вендором-SOAR" in all_text
 
 
 class TestEmptyReport:
