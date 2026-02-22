@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     # Claude (API key опционален при OAuth)
     anthropic_api_key: str | None = None
     claude_model: str = "claude-opus-4-6"
+    claude_model_light: str = "claude-sonnet-4-5-20250929"  # External/background sessions
+    claude_model_fast: str = "claude-haiku-4-5-20251001"    # Heartbeat
     http_proxy: str | None = None
 
     # OpenAI (для Whisper транскрипции)

@@ -108,6 +108,23 @@ HEARTBEAT_ALLOWED_TOOLS = [
     *MEMORY_TOOL_NAMES,
 ]
 
+# Background — scheduler/triggers (без browser, MCP manager, plugin manager, skill manager)
+BACKGROUND_ALLOWED_TOOLS = [
+    # Scheduler
+    "mcp__jobs__schedule_task",
+    "mcp__jobs__cancel_task",
+    # Triggers
+    *TRIGGER_TOOL_NAMES,
+    # Memory
+    *MEMORY_TOOL_NAMES,
+    # User management
+    *[f"mcp__jobs__{name}" for name in OWNER_TOOL_NAMES],
+    # Telegram API
+    *TELEGRAM_TOOL_NAMES,
+    # Skills
+    "Skill",
+]
+
 # Legacy: общий список (для обратной совместимости)
 TOOL_NAMES = OWNER_ALLOWED_TOOLS
 

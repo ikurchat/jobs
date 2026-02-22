@@ -1,0 +1,79 @@
+{
+  "gmail": {
+    "email": "dedkubus@gmail.com",
+    "imap_host": "imap.gmail.com",
+    "imap_port": 993,
+    "fetch_limit": 20,
+    "fetch_since_days": 3,
+    "poll_interval_minutes": 5
+  },
+  "baserow": {
+    "tables": {
+      "email_inbox": 848121,
+      "email_feedback": 848122,
+      "sender_profiles": 848123
+    }
+  },
+  "classification": {
+    "priority_base": 5,
+    "vip_boost": 5,
+    "control_deadline_boost": 3,
+    "sed_boost": 2,
+    "incident_boost": 3,
+    "unread_boost": 1,
+    "recent_24h_boost": 1,
+    "newsletter_penalty": -3,
+    "marketing_penalty": -4,
+    "confidence_threshold": 0.7
+  },
+  "sed_keywords": [
+    "контроль",
+    "срок",
+    "поручение",
+    "исполнение",
+    "согласование",
+    "резолюция",
+    "дедлайн",
+    "до ",
+    "не позднее",
+    "в срок до",
+    "на контроле",
+    "просрочка",
+    "напоминание",
+    "ответственный"
+  ],
+  "incident_keywords": [
+    "инцидент",
+    "атака",
+    "угроза",
+    "уязвимость",
+    "взлом",
+    "утечка",
+    "блокировка",
+    "alert",
+    "critical",
+    "breach",
+    "malware",
+    "phishing",
+    "ransomware"
+  ],
+  "task_keywords": [
+    "поручаю",
+    "прошу",
+    "необходимо",
+    "обеспечить",
+    "подготовить",
+    "доложить",
+    "представить",
+    "направить",
+    "организовать",
+    "провести"
+  ],
+  "learning": {
+    "min_confirmations_for_auto": 3,
+    "confidence_increment": 0.15,
+    "confidence_decay_days": 30,
+    "max_feedback_entries": 1000
+  },
+  "work_dir": "/dev/shm/email-monitor"
+}

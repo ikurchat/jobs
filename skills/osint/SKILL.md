@@ -1,5 +1,6 @@
 ---
 name: osint
+context: fork
 disable-model-invocation: true
 description: >
   Use this skill when the user asks to look up, investigate, or gather intelligence

@@ -1,0 +1,41 @@
+{
+  "vip_senders": {
+    "modestov": {
+      "patterns": ["модестов", "modestov"],
+      "email_patterns": [],
+      "priority": "critical",
+      "priority_score": 10,
+      "note": "Руководитель. Всё от него — максимальный приоритет.",
+      "sed_override": {
+        "default_priority": "high",
+        "with_control_keywords": "critical",
+        "note": "СЭД не всегда срочный, но контроль и сроки — критично"
+      }
+    }
+  },
+  "domain_rules": {
+    "internal_domains": [],
+    "trusted_domains": [],
+    "newsletter_domains": []
+  },
+  "keyword_boosts": {
+    "срочно": 3,
+    "немедленно": 3,
+    "urgent": 3,
+    "asap": 2,
+    "до конца дня": 2,
+    "сегодня": 1,
+    "ГосСОПКА": 2,
+    "НКЦКИ": 2,
+    "ФСТЭК": 2,
+    "ФСБ": 2,
+    "прокуратура": 3,
+    "проверка": 2
+  },
+  "auto_actions": {
+    "newsletter_domains": {
+      "action": "archive",
+      "notify": false
+    }
+  }
+}

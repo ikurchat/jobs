@@ -8,6 +8,13 @@ from typing import Literal
 import json
 
 
+def _ensure_aware(dt: datetime) -> datetime:
+    """Make naive datetime timezone-aware using local timezone."""
+    if dt.tzinfo is None:
+        return dt.astimezone()
+    return dt
+
+
 @dataclass
 class ExternalUser:
     """Внешний пользователь Telegram."""
@@ -95,13 +102,13 @@ class Task:
             status=row["status"],
             created_by=row["created_by"],
             assignee_id=row["assignee_id"],
-            deadline=datetime.fromisoformat(row["deadline"]) if row["deadline"] else None,
-            created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else datetime.now(),
-            updated_at=datetime.fromisoformat(row["updated_at"]) if row["updated_at"] else datetime.now(),
+            deadline=_ensure_aware(datetime.fromisoformat(row["deadline"])) if row["deadline"] else None,
+            created_at=_ensure_aware(datetime.fromisoformat(row["created_at"])) if row["created_at"] else datetime.now().astimezone(),
+            updated_at=_ensure_aware(datetime.fromisoformat(row["updated_at"])) if row["updated_at"] else datetime.now().astimezone(),
             kind=row["kind"] or "task",
             context=json.loads(row["context"]) if row["context"] else {},
             result=json.loads(row["result"]) if row["result"] else None,
-            schedule_at=datetime.fromisoformat(row["schedule_at"]) if row.get("schedule_at") else None,
+            schedule_at=_ensure_aware(datetime.fromisoformat(row["schedule_at"])) if row.get("schedule_at") else None,
             schedule_repeat=row.get("schedule_repeat"),
             next_step=row.get("next_step"),
             session_id=row.get("session_id"),

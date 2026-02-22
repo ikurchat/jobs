@@ -49,11 +49,13 @@ class UserSession:
         is_owner: bool = False,
         allowed_tools: list[str] | None = None,
         session_key: str | None = None,
+        model_override: str | None = None,
     ) -> None:
         self.telegram_id = telegram_id
         self.is_owner = is_owner
         self._system_prompt = system_prompt
         self._allowed_tools_override = allowed_tools
+        self._model_override = model_override
         key = session_key or str(telegram_id)
         self._session_file = session_dir / f"{key}.session"
         self._incoming_file = session_dir / f"{key}.incoming"
@@ -181,7 +183,7 @@ class UserSession:
             plugins = plugin_config.to_sdk_format()
 
         options = ClaudeAgentOptions(
-            model=settings.claude_model,
+            model=self._model_override or settings.claude_model,
             cwd=Path(settings.workspace_dir),
             permission_mode=permission_mode,
             env=env,
@@ -470,15 +472,18 @@ class SessionManager:
             display_name = user_display_name or str(telegram_id)
             system_prompt = self._get_external_prompt(telegram_id, display_name)
 
+        model = settings.claude_model if is_owner else settings.claude_model_light
+
         session = UserSession(
             telegram_id=telegram_id,
             session_dir=self._session_dir,
             system_prompt=system_prompt,
             is_owner=is_owner,
+            model_override=model,
         )
 
         self._sessions[telegram_id] = session
-        logger.info(f"Created session for {telegram_id} (owner={is_owner})")
+        logger.info(f"Created session for {telegram_id} (owner={is_owner}, model={model})")
 
         return session
 
@@ -489,12 +494,15 @@ class SessionManager:
         """Создаёт одноразовую сессию с owner tools для scheduler/triggers."""
         self._ephemeral_counter += 1
         key = -(100 + self._ephemeral_counter)
-        logger.debug(f"Created ephemeral background session [{key}]")
+        from src.tools import BACKGROUND_ALLOWED_TOOLS
+        logger.debug(f"Created ephemeral background session [{key}] (model={settings.claude_model_light})")
         return UserSession(
             telegram_id=key,
             session_dir=self._session_dir,
             system_prompt=self._get_owner_prompt(),
             is_owner=True,
+            allowed_tools=BACKGROUND_ALLOWED_TOOLS,
+            model_override=settings.claude_model_light,
         )
 
     def create_heartbeat_session(self) -> UserSession:
@@ -503,13 +511,14 @@ class SessionManager:
         key = -(100 + self._ephemeral_counter)
         from src.users.prompts import HEARTBEAT_SYSTEM_PROMPT
         from src.tools import HEARTBEAT_ALLOWED_TOOLS
-        logger.debug(f"Created ephemeral heartbeat session [{key}]")
+        logger.debug(f"Created ephemeral heartbeat session [{key}] (model={settings.claude_model_fast})")
         return UserSession(
             telegram_id=key,
             session_dir=self._session_dir,
             system_prompt=HEARTBEAT_SYSTEM_PROMPT,
             is_owner=False,
             allowed_tools=HEARTBEAT_ALLOWED_TOOLS,
+            model_override=settings.claude_model_fast,
         )
 
     def create_task_session(self, task_id: str) -> UserSession:
