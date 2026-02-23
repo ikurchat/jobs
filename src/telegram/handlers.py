@@ -29,6 +29,7 @@ MAX_TG_LENGTH = 4000
 TYPING_REFRESH_INTERVAL = 3.0
 LOADING_EMOJI_ID = 5255778087437617493
 MAX_DONE_LENGTH = 200
+MSG_DEDUP_TTL = 120  # Секунд хранения msg_id для дедупликации
 
 _SYSTEM_TAGS_RE = re.compile(r'<\s*/?(?:message-body|sender-meta)\s*/?\s*>', re.IGNORECASE)
 
@@ -98,6 +99,7 @@ class TelegramHandlers:
         self._is_premium: bool | None = None  # Lazy-init
         self._updater = Updater()
         self._reply_targets: dict[int, Any] = {}  # user_id → latest event (для follow-up)
+        self._seen_msg_ids: dict[int, float] = {}  # msg_id → timestamp (дедупликация)
 
         # Настраиваем sender'ы для user tools
         set_telegram_sender(self._send_message)
@@ -228,6 +230,19 @@ class TelegramHandlers:
         # Пропускаем каналы и группы — ими занимаются trigger subscriptions
         if event.is_channel or event.is_group:
             return
+
+        # Дедупликация: Telethon может доставить одно сообщение несколько раз
+        # при reconnect (StringSession не персистит pts/qts/date)
+        msg_id = event.message.id
+        now = asyncio.get_event_loop().time()
+        self._seen_msg_ids = {
+            k: v for k, v in self._seen_msg_ids.items()
+            if now - v < MSG_DEDUP_TTL
+        }
+        if msg_id in self._seen_msg_ids:
+            logger.debug(f"Duplicate message {msg_id}, skipping")
+            return
+        self._seen_msg_ids[msg_id] = now
 
         message = event.message
         sender = await event.get_sender()
