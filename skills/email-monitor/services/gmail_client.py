@@ -18,6 +18,8 @@ import email.message
 import email.utils
 import imaplib
 import json
+import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -69,6 +71,10 @@ def _extract_body(msg: email.message.Message) -> tuple[str, str]:
     if msg.is_multipart():
         for part in msg.walk():
             ct = part.get_content_type()
+            # Пропускаем части, которые точно вложения
+            if _is_attachment_part(part):
+                continue
+            # Дополнительно проверяем Content-Disposition: attachment
             disp = _decode_content_disposition(str(part.get("Content-Disposition", "")))
             if "attachment" in disp:
                 continue
@@ -101,7 +107,6 @@ def _extract_filename_from_disp(raw_disp: str, part: email.message.Message) -> s
         return _decode_header(fn)
     # Fallback: парсим декодированный Content-Disposition вручную
     decoded = _decode_content_disposition(raw_disp)
-    import re
     m = re.search(r'filename\s*=\s*"?([^";\r\n]+)"?', decoded)
     if m:
         return m.group(1).strip()
@@ -114,11 +119,76 @@ _ATTACHMENTS_DIR = Path("/dev/shm/email-monitor/attachments")
 _ENCRYPTED_DOCX_MAGIC = b"\xd0\xcf\x11\xe0"
 _DECRYPT_PASSWORD = os.environ.get("DOCX_DECRYPT_PASSWORD", "")
 
+# Magic bytes → расширение файла
+_MAGIC_BYTES = [
+    (b"PK\x03\x04", ".zip"),     # ZIP/OOXML (docx/xlsx/pptx)
+    (b"%PDF", ".pdf"),
+    (b"\xd0\xcf\x11\xe0", ".doc"),  # OLE2 (doc/xls/ppt)
+    (b"Rar!\x1a\x07", ".rar"),
+]
+
+# Content-Type внутри ZIP → точное расширение OOXML
+_OOXML_CONTENT_TYPES = {
+    b"word/": ".docx",
+    b"xl/": ".xlsx",
+    b"ppt/": ".pptx",
+}
+
+
+def _detect_ext_by_magic(payload: bytes) -> str:
+    """Определяет расширение файла по magic bytes."""
+    if not payload or len(payload) < 4:
+        return ""
+    for magic, ext in _MAGIC_BYTES:
+        if payload[:len(magic)] == magic:
+            # Для ZIP — пробуем определить OOXML-тип
+            if ext == ".zip" and len(payload) > 30:
+                for marker, ooxml_ext in _OOXML_CONTENT_TYPES.items():
+                    if marker in payload[:2000]:
+                        return ooxml_ext
+            return ext
+    return ""
+
+
+def _is_attachment_part(part: email.message.Message) -> bool:
+    """Определяет, является ли part вложением (включая случаи без Content-Disposition)."""
+    ct = part.get_content_type().lower()
+    maintype = part.get_content_maintype()
+
+    # Стандартная проверка Content-Disposition
+    raw_disp = str(part.get("Content-Disposition", ""))
+    disp = _decode_content_disposition(raw_disp)
+    if "attachment" in disp:
+        return True
+
+    # Пропускаем текстовые части (тело письма)
+    if maintype == "text":
+        return False
+    # Пропускаем multipart контейнеры
+    if maintype == "multipart":
+        return False
+
+    # Fallback: application/octet-stream или другие бинарные типы без disposition
+    if ct in ("application/octet-stream", "application/x-unknown"):
+        return True
+    # Известные типы документов
+    if ct in ("application/pdf", "application/msword",
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+              "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+              "application/vnd.ms-excel", "application/zip", "application/x-rar-compressed"):
+        return True
+
+    return False
+
 
 def _save_attachment(part: email.message.Message, filename: str, uid: str) -> Optional[str]:
     """Сохраняет вложение на диск, расшифровывает если нужно. Возвращает путь или None."""
     ext = Path(filename).suffix.lower()
-    if ext in _SKIP_EXTENSIONS or ext not in _SAVE_EXTENSIONS:
+    if ext in _SKIP_EXTENSIONS:
+        return None
+    # Сохраняем известные расширения + .bin (неопознанные от форвардера)
+    if ext and ext != ".bin" and ext not in _SAVE_EXTENSIONS:
         return None
     payload = part.get_payload(decode=True)
     if not payload:
@@ -141,8 +211,10 @@ def _save_attachment(part: email.message.Message, filename: str, uid: str) -> Op
                 office_file.load_key(password=_DECRYPT_PASSWORD)
                 with open(dest, "wb") as f_out:
                     office_file.decrypt(f_out)
-        except Exception:
-            # Не удалось расшифровать — сохраняем как есть
+        except Exception as e:
+            # Не удалось расшифровать — сохраняем как есть, логируем
+            import sys
+            print(f"[email-monitor] Decryption failed for {safe_name}: {e}", file=sys.stderr)
             dest.write_bytes(payload)
         finally:
             encrypted_path.unlink(missing_ok=True)
@@ -153,15 +225,27 @@ def _save_attachment(part: email.message.Message, filename: str, uid: str) -> Op
 
 
 def _get_attachments(msg: email.message.Message) -> list[str]:
+    """Извлекает имена вложений, включая безымянные (magic bytes fallback)."""
     names = []
-    if msg.is_multipart():
-        for part in msg.walk():
-            raw_disp = str(part.get("Content-Disposition", ""))
-            disp = _decode_content_disposition(raw_disp)
-            if "attachment" in disp:
-                fn = _extract_filename_from_disp(raw_disp, part)
-                if fn:
-                    names.append(fn)
+    if not msg.is_multipart():
+        return names
+    counter = 0
+    for part in msg.walk():
+        if not _is_attachment_part(part):
+            continue
+        raw_disp = str(part.get("Content-Disposition", ""))
+        fn = _extract_filename_from_disp(raw_disp, part)
+        if not fn:
+            # Пробуем определить по magic bytes
+            payload = part.get_payload(decode=True)
+            ext = _detect_ext_by_magic(payload) if payload else ""
+            if ext:
+                counter += 1
+                fn = f"attachment_{counter}{ext}"
+            else:
+                counter += 1
+                fn = f"attachment_{counter}.bin"
+        names.append(fn)
     return names
 
 
@@ -181,7 +265,6 @@ def _parse_sender(raw: str) -> tuple[str, str]:
 
 def _strip_html_quick(html: str) -> str:
     """Быстрая очистка HTML для preview."""
-    import re
     text = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
     text = re.sub(r"</(?:p|tr|div|li)>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<(?:td|th)[^>]*>", " ", text, flags=re.IGNORECASE)
@@ -194,18 +277,40 @@ def _strip_html_quick(html: str) -> str:
 
 
 def _save_all_attachments(msg: email.message.Message, uid: str) -> list[str]:
-    """Сохраняет все подходящие вложения, возвращает список путей."""
+    """Сохраняет все подходящие вложения, возвращает список путей.
+
+    Поддерживает вложения без Content-Disposition и без filename
+    (типичная ситуация для форвардеров типа dedkubus → rscc.ru).
+    """
     paths = []
     if not msg.is_multipart():
         return paths
+    counter = 0
     for part in msg.walk():
-        raw_disp = str(part.get("Content-Disposition", ""))
-        disp = _decode_content_disposition(raw_disp)
-        if "attachment" not in disp:
+        if not _is_attachment_part(part):
             continue
+        raw_disp = str(part.get("Content-Disposition", ""))
         fn = _extract_filename_from_disp(raw_disp, part)
         if not fn:
-            continue
+            # Определяем тип по magic bytes
+            payload = part.get_payload(decode=True)
+            ext = _detect_ext_by_magic(payload) if payload else ""
+            if not ext:
+                # Пробуем по Content-Type
+                ct = part.get_content_type().lower()
+                ct_ext_map = {
+                    "application/pdf": ".pdf",
+                    "application/msword": ".doc",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+                    "application/vnd.ms-excel": ".xls",
+                    "application/zip": ".zip",
+                    "application/x-rar-compressed": ".rar",
+                }
+                ext = ct_ext_map.get(ct, "")
+            counter += 1
+            fn = f"attachment_{uid}_{counter}{ext or '.bin'}"
         saved = _save_attachment(part, fn, uid)
         if saved:
             paths.append(saved)

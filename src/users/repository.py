@@ -3,6 +3,7 @@ Repository — хранение данных о пользователях и з
 """
 
 import asyncio
+import json
 import sqlite3
 import uuid
 from datetime import datetime
@@ -29,9 +30,15 @@ class UsersRepository:
         async with self._db_lock:
             # Double-check после получения lock
             if self._db is None:
-                self._db = await aiosqlite.connect(self._db_path)
-                self._db.row_factory = aiosqlite.Row
-                await self._init_schema()
+                db = await aiosqlite.connect(self._db_path)
+                db.row_factory = aiosqlite.Row
+                try:
+                    self._db = db
+                    await self._init_schema()
+                except Exception:
+                    self._db = None
+                    await db.close()
+                    raise
         return self._db
 
     async def _init_schema(self) -> None:
@@ -63,8 +70,10 @@ class UsersRepository:
             await self._db.execute("ALTER TABLE external_users ADD COLUMN is_banned INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass  # column already exists
-
-        # Миграция: trusted roles
+        try:
+            await self._db.execute("ALTER TABLE external_users ADD COLUMN is_whitelisted INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         try:
             await self._db.execute("ALTER TABLE external_users ADD COLUMN role TEXT DEFAULT 'external'")
         except sqlite3.OperationalError:
@@ -196,7 +205,7 @@ class UsersRepository:
             "SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_tasks'"
         )
         if await cursor.fetchone():
-            import json as _json
+
             # Читаем все pending задачи
             cursor = await self._db.execute(
                 "SELECT id, prompt, scheduled_at, repeat_seconds, status FROM scheduled_tasks WHERE status = 'pending'"
@@ -208,7 +217,7 @@ class UsersRepository:
                 prompt = row["prompt"]
                 scheduled_at = row["scheduled_at"]
                 repeat_seconds = row["repeat_seconds"]
-                context_json = _json.dumps({"prompt": prompt}, ensure_ascii=False)
+                context_json = json.dumps({"prompt": prompt}, ensure_ascii=False)
 
                 await self._db.execute(
                     """
@@ -429,16 +438,12 @@ class UsersRepository:
         return [self._row_to_user(row) for row in await cursor.fetchall()]
 
     def _row_to_user(self, row: aiosqlite.Row) -> ExternalUser:
-        import json as _json
         keys = row.keys()
-
-        allowed_actions = []
-        if "allowed_actions" in keys and row["allowed_actions"]:
-            try:
-                allowed_actions = _json.loads(row["allowed_actions"])
-            except (ValueError, TypeError):
-                allowed_actions = []
-
+        actions_raw = row["allowed_actions"] if "allowed_actions" in keys else "[]"
+        try:
+            actions = json.loads(actions_raw) if actions_raw else []
+        except (ValueError, TypeError):
+            actions = []
         return ExternalUser(
             telegram_id=row["telegram_id"],
             username=row["username"],
@@ -450,8 +455,9 @@ class UsersRepository:
             last_contact=datetime.fromisoformat(row["last_contact"]) if row["last_contact"] else datetime.now(),
             warnings_count=row["warnings_count"] if "warnings_count" in keys else 0,
             is_banned=bool(row["is_banned"]) if "is_banned" in keys else False,
-            role=row["role"] if "role" in keys and row["role"] else "external",
-            allowed_actions=allowed_actions,
+            is_whitelisted=bool(row["is_whitelisted"]) if "is_whitelisted" in keys else False,
+            role=row["role"] if "role" in keys else "external",
+            allowed_actions=actions,
         )
 
     # =========================================================================
@@ -486,6 +492,51 @@ class UsersRepository:
         await db.commit()
         if cursor.rowcount > 0:
             logger.info(f"User {telegram_id} unbanned")
+            return True
+        return False
+
+    async def set_user_role(self, telegram_id: int, role: str, allowed_actions: list[str]) -> bool:
+        """Устанавливает роль и разрешённые действия пользователя."""
+        db = await self._get_db()
+        actions_json = json.dumps(allowed_actions, ensure_ascii=False)
+        cursor = await db.execute(
+            "UPDATE external_users SET role = ?, allowed_actions = ? WHERE telegram_id = ?",
+            (role, actions_json, telegram_id),
+        )
+        await db.commit()
+        if cursor.rowcount > 0:
+            logger.info(f"User {telegram_id} role={role}, actions={allowed_actions}")
+            return True
+        return False
+
+    async def is_user_whitelisted(self, telegram_id: int) -> bool:
+        """Проверяет, находится ли пользователь в whitelist."""
+        user = await self.get_user(telegram_id)
+        return user.is_whitelisted if user else False
+
+    async def whitelist_user(self, telegram_id: int) -> bool:
+        """Добавляет пользователя в whitelist."""
+        db = await self._get_db()
+        cursor = await db.execute(
+            "UPDATE external_users SET is_whitelisted = 1 WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        await db.commit()
+        if cursor.rowcount > 0:
+            logger.info(f"User {telegram_id} whitelisted")
+            return True
+        return False
+
+    async def unwhitelist_user(self, telegram_id: int) -> bool:
+        """Убирает пользователя из whitelist."""
+        db = await self._get_db()
+        cursor = await db.execute(
+            "UPDATE external_users SET is_whitelisted = 0 WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        await db.commit()
+        if cursor.rowcount > 0:
+            logger.info(f"User {telegram_id} unwhitelisted")
             return True
         return False
 
@@ -530,37 +581,6 @@ class UsersRepository:
             "SELECT * FROM external_users WHERE is_banned = 1"
         )
         return [self._row_to_user(row) for row in await cursor.fetchall()]
-
-    # =========================================================================
-    # Trusted Roles
-    # =========================================================================
-
-    async def set_user_role(
-        self,
-        telegram_id: int,
-        role: str,
-        allowed_actions: list[str] | None = None,
-    ) -> bool:
-        """Устанавливает роль и разрешённые действия пользователю."""
-        import json as _json
-        db = await self._get_db()
-        actions_json = _json.dumps(allowed_actions or [], ensure_ascii=False)
-        cursor = await db.execute(
-            "UPDATE external_users SET role = ?, allowed_actions = ? WHERE telegram_id = ?",
-            (role, actions_json, telegram_id),
-        )
-        await db.commit()
-        if cursor.rowcount > 0:
-            logger.info(f"User {telegram_id} role={role} actions={allowed_actions}")
-            return True
-        return False
-
-    async def get_user_role(self, telegram_id: int) -> tuple[str, list[str]]:
-        """Возвращает (role, allowed_actions) пользователя."""
-        user = await self.get_user(telegram_id)
-        if user:
-            return user.role, user.allowed_actions
-        return "external", []
 
     # =========================================================================
     # Tasks

@@ -32,6 +32,7 @@ class ExternalUser:
     last_contact: datetime = field(default_factory=datetime.now)
     warnings_count: int = 0
     is_banned: bool = False
+    is_whitelisted: bool = False
     role: Literal["external", "trusted"] = "external"
     allowed_actions: list[str] = field(default_factory=list)
 

@@ -351,6 +351,11 @@ def generate_summary(email_data: dict) -> dict:
     if parsed.get("has_attachments"):
         att = parsed.get("attachment_names", [])
         lines.append(f"📎 Вложения: {', '.join(att) if att else 'есть'}")
+        # Хинт для doc-review, если есть .docx
+        att_paths = parsed.get("attachment_paths", [])
+        docx_files = [p for p in att_paths if p.endswith((".docx", ".doc"))]
+        if docx_files:
+            lines.append(f"📝 doc-review: {len(docx_files)} документ(ов) для рецензии")
 
     preview = parsed.get("clean_preview", "")
     if preview and not sed_data.get("resolution_text"):

@@ -107,7 +107,7 @@ async def create_task(args: dict[str, Any]) -> dict[str, Any]:
         title=title,
         kind=kind,
         assignee_id=user.telegram_id,
-        created_by=settings.tg_user_id,
+        created_by=settings.primary_owner_id,
         deadline=deadline,
         context=context,
     )
@@ -261,7 +261,8 @@ async def list_users(args: dict[str, Any]) -> dict[str, Any]:
     for user in users:
         username = f" @{user.username}" if user.username else ""
         banned = " [BAN]" if user.is_banned else ""
-        lines.append(f"• {user.display_name}{username}{banned}")
+        wl = " [WL]" if user.is_whitelisted else ""
+        lines.append(f"• {user.display_name}{username}{banned}{wl}")
 
     return _text("\n".join(lines))
 
@@ -293,7 +294,7 @@ async def ban_user(args: dict[str, Any]) -> dict[str, Any]:
     if _telegram_sender:
         username = f" (@{user.username})" if user.username else ""
         await _telegram_sender(
-            settings.tg_user_id,
+            settings.primary_owner_id,
             f"Пользователь {user.display_name}{username} забанен"
         )
 
@@ -330,7 +331,7 @@ async def unban_user(args: dict[str, Any]) -> dict[str, Any]:
     if _telegram_sender:
         username = f" (@{user.username})" if user.username else ""
         await _telegram_sender(
-            settings.tg_user_id,
+            settings.primary_owner_id,
             f"Пользователь {user.display_name}{username} разбанен"
         )
 
@@ -441,7 +442,7 @@ async def update_task(args: dict[str, Any]) -> dict[str, Any]:
                 # Уведомляем owner'а если нужно
                 if content and _telegram_sender:
                     from src.config import settings as _s
-                    await _telegram_sender(_s.tg_user_id, f"💎 Обновлена [{task_id}]:\n{content[:500]}")
+                    await _telegram_sender(_s.primary_owner_id, f"💎 Обновлена [{task_id}]:\n{content[:500]}")
             except Exception as e:
                 logger.error(f"Task followup [{task_id}] failed: {e}")
 
@@ -459,7 +460,7 @@ async def update_task(args: dict[str, Any]) -> dict[str, Any]:
         if details:
             details = _sanitize_tags(details)
             message += f"\n<message-body>\n{details}\n</message-body>"
-        await _context_sender(settings.tg_user_id, message)
+        await _context_sender(settings.primary_owner_id, message)
 
     return _text(f"💎 Обновлена [{task_id}], владелец уведомлён")
 
@@ -487,7 +488,7 @@ async def send_summary_to_owner(args: dict[str, Any]) -> dict[str, Any]:
     message = f"<sender-meta>Сводка от {user_name} (ID: {user_id})</sender-meta>\n<message-body>\n{summary}\n</message-body>"
 
     if _context_sender:
-        await _context_sender(settings.tg_user_id, message)
+        await _context_sender(settings.primary_owner_id, message)
         logger.info(f"Summary sent to owner context from {user_name}")
         return _text("Сводка отправлена владельцу")
     else:
@@ -508,7 +509,7 @@ async def ban_violator(args: dict[str, Any]) -> dict[str, Any]:
         return _error("user_id обязателен (твой Telegram ID из промпта)")
 
     from src.config import settings as _settings
-    if user_id == _settings.tg_user_id:
+    if _settings.is_owner(user_id):
         return _error("Невозможно забанить владельца")
 
     repo = get_users_repository()
@@ -526,7 +527,7 @@ async def ban_violator(args: dict[str, Any]) -> dict[str, Any]:
     if _telegram_sender:
         username = f" (@{user.username})" if user.username else ""
         await _telegram_sender(
-            settings.tg_user_id,
+            settings.primary_owner_id,
             f"{user.display_name}{username} забанен.\nПричина: {reason}"
         )
 
@@ -627,9 +628,51 @@ async def read_task_context(args: dict[str, Any]) -> dict[str, Any]:
     return _text("\n".join(output))
 
 
-# =============================================================================
-# Tool Collections
-# =============================================================================
+@tool(
+    "whitelist_user",
+    "Add user to outgoing messages whitelist. Bot can only send DMs to whitelisted users.",
+    {"user": str},
+)
+async def whitelist_user_tool(args: dict[str, Any]) -> dict[str, Any]:
+    """Добавляет пользователя в whitelist исходящих сообщений."""
+    user_query = args.get("user")
+    if not user_query:
+        return _error("user обязателен")
+
+    repo = get_users_repository()
+    user = await repo.find_user(user_query)
+    if not user:
+        return _error(f"Пользователь '{user_query}' не найден")
+
+    if user.is_whitelisted:
+        return _text(f"{user.display_name} уже в whitelist")
+
+    await repo.whitelist_user(user.telegram_id)
+    return _text(f"{user.display_name} добавлен в whitelist")
+
+
+@tool(
+    "unwhitelist_user",
+    "Remove user from outgoing messages whitelist. Bot will not be able to send DMs to this user.",
+    {"user": str},
+)
+async def unwhitelist_user_tool(args: dict[str, Any]) -> dict[str, Any]:
+    """Убирает пользователя из whitelist исходящих сообщений."""
+    user_query = args.get("user")
+    if not user_query:
+        return _error("user обязателен")
+
+    repo = get_users_repository()
+    user = await repo.find_user(user_query)
+    if not user:
+        return _error(f"Пользователь '{user_query}' не найден")
+
+    if not user.is_whitelisted:
+        return _text(f"{user.display_name} не в whitelist")
+
+    await repo.unwhitelist_user(user.telegram_id)
+    return _text(f"{user.display_name} убран из whitelist")
+
 
 @tool(
     "set_user_role",
@@ -692,9 +735,14 @@ async def get_user_permissions(args: dict[str, Any]) -> dict[str, Any]:
         f"Роль: {user.role}\n"
         f"Действия: [{actions_str}]\n"
         f"Предупреждения: {user.warnings_count}\n"
-        f"Бан: {'да' if user.is_banned else 'нет'}"
+        f"Бан: {'да' if user.is_banned else 'нет'}\n"
+        f"Whitelist: {'да' if user.is_whitelisted else 'нет'}"
     )
 
+
+# =============================================================================
+# Tool Collections
+# =============================================================================
 
 OWNER_TOOLS = [
     create_task,
@@ -704,6 +752,8 @@ OWNER_TOOLS = [
     list_users,
     ban_user,
     unban_user,
+    whitelist_user_tool,
+    unwhitelist_user_tool,
     read_task_context,
     set_user_role,
     get_user_permissions,

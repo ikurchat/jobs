@@ -20,7 +20,7 @@ from src.config import settings
 from src.users.prompts import HEARTBEAT_PROMPT
 
 if TYPE_CHECKING:
-    from telethon import TelegramClient
+    from src.telegram.transport import Transport
     from src.triggers.executor import TriggerExecutor
     from src.users.session_manager import SessionManager
     from src.users.models import Task
@@ -50,12 +50,12 @@ class HeartbeatRunner:
     def __init__(
         self,
         executor: TriggerExecutor,
-        client: TelegramClient,
+        transport: "Transport",
         session_manager: SessionManager,
         interval_minutes: int = DEFAULT_INTERVAL_MINUTES,
     ) -> None:
         self._executor = executor
-        self._client = client
+        self._transport = transport
         self._session_manager = session_manager
         self._interval = interval_minutes * 60  # в секунды
         self._running = False
@@ -122,13 +122,13 @@ class HeartbeatRunner:
                 message = f"\U0001f4a1\n{content}"
                 if len(message) > MAX_MESSAGE_LENGTH:
                     message = message[:MAX_MESSAGE_LENGTH] + "..."
-                await self._client.send_message(settings.tg_user_id, message)
+                await self._transport.send_message(settings.primary_owner_id, message)
                 logger.info(f"Heartbeat notification sent: {content[:80]}...")
 
         # 4. Если task sessions вернули сообщения — отправляем
         if task_messages:
             combined = "\n".join(task_messages)
-            await self._client.send_message(settings.tg_user_id, f"💎 Задачи:\n{combined}")
+            await self._transport.send_message(settings.primary_owner_id, f"💎 Задачи:\n{combined}")
 
     async def _check_task_sessions(self) -> list[str]:
         """Resume task sessions параллельно для проверки состояния."""
@@ -206,7 +206,7 @@ class HeartbeatRunner:
         # Отправляем напоминания пользователям
         for user_id, tasks in by_user.items():
             # Не напоминаем owner'у через этот механизм
-            if user_id == settings.tg_user_id:
+            if settings.is_owner(user_id):
                 continue
 
             user = await repo.get_user(user_id)
@@ -215,7 +215,7 @@ class HeartbeatRunner:
             # Формируем напоминание
             task_lines = []
             for task in tasks[:3]:  # Максимум 3 задачи в напоминании
-                days = (datetime.now().astimezone() - task.deadline).days if task.deadline else 0
+                days = (datetime.now() - task.deadline).days if task.deadline else 0
                 task_lines.append(f"• {task.title[:50]} (просрочено {days} дн.)")
 
             reminder = "Напоминание о просроченных задачах:\n\n" + "\n".join(task_lines)
@@ -223,7 +223,7 @@ class HeartbeatRunner:
                 reminder += f"\n\n...и ещё {len(tasks) - 3} задач(и)"
 
             try:
-                await self._client.send_message(user_id, reminder)
+                await self._transport.send_message(user_id, reminder)
                 logger.info(f"Sent reminder to {user_name}: {len(tasks)} overdue tasks")
             except Exception as e:
                 logger.error(f"Failed to send reminder to {user_name}: {e}")
@@ -242,7 +242,7 @@ class HeartbeatRunner:
         active = await repo.list_tasks(include_done=False)
 
         from datetime import timedelta
-        now = datetime.now().astimezone()
+        now = datetime.now()
         cutoff = now + timedelta(hours=24)
         upcoming = [t for t in active if t.deadline and not t.is_overdue and t.deadline <= cutoff]
 

@@ -5,40 +5,15 @@ Jobs — Personal AI Assistant.
 """
 
 import asyncio
-import shutil
 import sys
-from pathlib import Path
 
 from loguru import logger
-
-# Patch SDK to handle rate_limit_event gracefully.
-# SDK v0.1.39 raises MessageParseError for unknown message types, but
-# rate_limit_event is a normal informational event from Claude CLI (not fatal).
-# Without this patch the entire response stream is aborted on rate_limit_event.
-def _patch_sdk_message_parser() -> None:
-    from claude_agent_sdk._internal import client as _sdk_client
-    from claude_agent_sdk._internal import message_parser as _sdk_mp
-    from claude_agent_sdk._internal.message_parser import parse_message as _orig
-    from claude_agent_sdk.types import SystemMessage
-
-    def _patched_parse(data: dict) -> object:
-        if isinstance(data, dict) and data.get("type") == "rate_limit_event":
-            return SystemMessage(subtype="rate_limit_event", data=data)
-        return _orig(data)
-
-    # Patch both locations:
-    # 1. _internal/client.py imports parse_message at module level
-    _sdk_client.parse_message = _patched_parse
-    # 2. public client.py does `from ._internal.message_parser import parse_message`
-    #    inside receive_messages() at runtime
-    _sdk_mp.parse_message = _patched_parse
-
-_patch_sdk_message_parser()
 
 from src.config import settings, set_owner_info
 from src.telegram.client import create_client, load_session_string
 from src.telegram.handlers import TelegramHandlers
-from src.telegram.tools import set_telegram_client
+from src.telegram.tools import set_transports
+from src.telegram.transport import Transport
 from src.setup import run_setup, is_telegram_configured, is_claude_configured
 from src.tools.scheduler import SchedulerRunner
 from src.users import get_session_manager
@@ -47,23 +22,6 @@ from src.heartbeat import HeartbeatRunner
 from src.triggers import TriggerExecutor, TriggerManager, set_trigger_manager
 from src.triggers.sources.tg_channel import TelegramChannelTrigger
 from src.updater import Updater, AUTO_CHECK_INTERVAL
-
-
-CLAUDE_JSON = Path("/home/jobs/.claude.json")
-CLAUDE_BACKUPS = Path("/home/jobs/.claude/backups")
-
-
-def _restore_claude_json_if_needed() -> None:
-    """Восстанавливает .claude.json из бэкапа, если файла нет (SDK ищет его при старте)."""
-    if CLAUDE_JSON.exists():
-        return
-    if not CLAUDE_BACKUPS.is_dir():
-        return
-    backups = sorted(CLAUDE_BACKUPS.glob(".claude.json.backup.*"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not backups:
-        return
-    shutil.copy(backups[0], CLAUDE_JSON)
-    logger.info(f"Restored {CLAUDE_JSON} from backup")
 
 
 def setup_logging() -> None:
@@ -76,17 +34,37 @@ def setup_logging() -> None:
     )
 
 
+def _has_telethon_config() -> bool:
+    """Проверяет наличие Telethon конфигурации."""
+    return bool(settings.tg_api_id and settings.tg_api_hash)
+
+
+def _has_telethon_session() -> bool:
+    """Проверяет наличие Telethon сессии."""
+    session = load_session_string()
+    return session is not None and len(session) > 0
+
+
 async def main() -> None:
     """Точка входа."""
     setup_logging()
+
+    force_setup = "--setup" in sys.argv
+    if force_setup:
+        logger.info("Принудительный setup (--setup)")
+        if not await run_setup(force=True):
+            logger.error("Setup не завершён")
+            sys.exit(1)
+
+    # SDK patches (до любого использования claude_agent_sdk)
+    from src.users.sdk_compat import apply_sdk_patches
+    apply_sdk_patches()
+
     logger.info("Starting Jobs - Personal AI Assistant")
 
     # Инициализируем память (создаёт структуру файлов)
     memory_storage = get_storage()
     logger.info(f"Memory initialized at {settings.workspace_dir}")
-
-    # Восстановить .claude.json из бэкапа, если SDK его ожидает
-    _restore_claude_json_if_needed()
 
     # Setup при первом запуске
     if not is_telegram_configured() or not is_claude_configured():
@@ -95,49 +73,82 @@ async def main() -> None:
             logger.error("Setup не завершён")
             sys.exit(1)
 
-    # Создаём клиент
-    session_string = load_session_string()
-    client = create_client(session_string)
-    set_telegram_client(client)  # Для Telegram tools
+    transports: list[Transport] = []
+    telethon_transport = None
+    telethon_client = None
 
-    try:
-        await client.connect()
+    # Telethon (если настроен и есть сессия)
+    if _has_telethon_config() and _has_telethon_session():
+        from src.telegram.telethon_transport import TelethonTransport
 
-        if not await client.is_user_authorized():
-            logger.error("Telegram сессия невалидна. Удалите data/telethon.session")
-            sys.exit(1)
+        session_string = load_session_string()
+        client = create_client(session_string)
+        telethon_transport = TelethonTransport(client)
+        telethon_client = client
 
-        me = await client.get_me()
-        logger.info(f"Logged in as {me.first_name} (ID: {me.id})")
-
-        # Загружаем диалоги в кэш и получаем инфо о owner'е
-        await client.get_dialogs()
         try:
-            owner = await client.get_entity(settings.tg_user_id)
-            set_owner_info(
-                telegram_id=settings.tg_user_id,
-                first_name=owner.first_name,
-                username=owner.username,
-            )
-            logger.info(f"Owner: {owner.first_name} @{owner.username} (ID: {settings.tg_user_id})")
+            await client.connect()
+
+            if not await client.is_user_authorized():
+                logger.error("Telegram Telethon сессия невалидна. Удалите data/telethon.session")
+                sys.exit(1)
+
+            me = await client.get_me()
+            logger.info(f"Telethon: logged in as {me.first_name} (ID: {me.id})")
+
+            # Загружаем диалоги в кэш и получаем инфо о owner'е
+            await client.get_dialogs()
+            try:
+                owner = await client.get_entity(settings.primary_owner_id)
+                set_owner_info(
+                    telegram_id=settings.primary_owner_id,
+                    first_name=owner.first_name,
+                    username=owner.username,
+                )
+                logger.info(f"Owner: {owner.first_name} @{owner.username} (owners: {settings.tg_owner_ids})")
+            except Exception as e:
+                logger.warning(f"Could not get owner info: {e}. Write to bot first.")
+                set_owner_info(settings.primary_owner_id, None, None)
+
+            if me.id not in settings.tg_owner_ids:
+                logger.warning(f"Logged user {me.id} not in TG_OWNER_IDS {settings.tg_owner_ids}")
+
+            await telethon_transport.start()
+            transports.append(telethon_transport)
+
         except Exception as e:
-            logger.warning(f"Could not get owner info: {e}. Write to bot first.")
-            set_owner_info(settings.tg_user_id, None, None)
+            logger.error(f"Telethon connection error: {e}")
+            raise
 
-        if me.id != settings.tg_user_id:
-            logger.warning(f"Logged user {me.id} != TG_USER_ID {settings.tg_user_id}")
+    # Bot (если настроен)
+    if settings.tg_bot_token:
+        from src.telegram.bot_transport import BotTransport
 
-    except Exception as e:
-        logger.error(f"Connection error: {e}")
-        raise
+        bot_transport = BotTransport(settings.tg_bot_token)
+        await bot_transport.start()
+        transports.append(bot_transport)
+
+        me = await bot_transport.get_me()
+        logger.info(f"Bot: @{me['username']} (ID: {me['id']})")
+
+    if not transports:
+        logger.error("Ни Telethon, ни Bot не настроены")
+        sys.exit(1)
+
+    # Primary transport: Telethon preferred, Bot fallback
+    primary = transports[0]
+
+    # Tools
+    set_transports(primary, telethon_client)
 
     # Unified Trigger System
     session_manager = get_session_manager()
-    executor = TriggerExecutor(client, session_manager)
-    trigger_manager = TriggerManager(executor, client, str(settings.db_path))
+    executor = TriggerExecutor(primary, session_manager)
+    trigger_manager = TriggerManager(executor, primary, str(settings.db_path))
 
-    # Регистрируем типы динамических триггеров
-    trigger_manager.register_type("tg_channel", TelegramChannelTrigger)
+    # Регистрируем типы динамических триггеров (только если Telethon)
+    if telethon_transport:
+        trigger_manager.register_type("tg_channel", TelegramChannelTrigger)
 
     # Регистрируем встроенные
     scheduler = SchedulerRunner(executor=executor)
@@ -146,7 +157,7 @@ async def main() -> None:
     if settings.heartbeat_interval_minutes > 0:
         heartbeat = HeartbeatRunner(
             executor=executor,
-            client=client,
+            transport=primary,
             session_manager=session_manager,
             interval_minutes=settings.heartbeat_interval_minutes,
         )
@@ -160,9 +171,10 @@ async def main() -> None:
     # Запуск (builtins + загрузка подписок из DB)
     await trigger_manager.start_all()
 
-    # Регистрируем handlers (интерактивный Telegram — отдельно)
-    handlers = TelegramHandlers(client, executor)
-    handlers.register()
+    # Регистрируем handlers — один экземпляр, регистрируем на все транспорты
+    handlers = TelegramHandlers(primary, executor)
+    for t in transports:
+        handlers.register(t)
     await handlers.on_startup()
 
     # Автопроверка обновлений
@@ -173,17 +185,25 @@ async def main() -> None:
             try:
                 text = await updater.check_for_notification()
                 if text:
-                    await client.send_message(settings.tg_user_id, text)
+                    await primary.send_message(settings.primary_owner_id, text)
             except Exception as e:
                 logger.debug(f"Auto update check failed: {e}")
 
     asyncio.create_task(_auto_check_updates())
 
-    logger.info("Bot is running. Send me a message!")
+    logger.info(f"Bot is running ({len(transports)} transport(s)). Send me a message!")
 
+    # Run transport loops параллельно
+    loop_tasks = [asyncio.create_task(t.run_forever()) for t in transports]
     try:
-        await client.run_until_disconnected()
+        await asyncio.gather(*loop_tasks)
     finally:
+        # Останавливаем транспорты
+        for t in transports:
+            try:
+                await t.stop()
+            except Exception as e:
+                logger.error(f"Transport stop error: {e}")
         await trigger_manager.stop_all()
 
 

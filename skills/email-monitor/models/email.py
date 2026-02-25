@@ -27,6 +27,7 @@ class Email:
     task_id: Optional[int] = None   # ID задачи в task-control
     has_attachments: bool = False
     attachment_names: list = field(default_factory=list)
+    attachment_paths: list = field(default_factory=list)
     labels: list = field(default_factory=list)
     is_reply: bool = False
     baserow_id: Optional[int] = None
@@ -48,6 +49,7 @@ class Email:
             "task_id": self.task_id or "",
             "has_attachments": self.has_attachments,
             "attachment_names": ", ".join(self.attachment_names),
+            "attachment_paths": self.attachment_paths,
             "is_reply": self.is_reply,
         }
 

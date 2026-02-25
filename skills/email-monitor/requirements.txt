@@ -1,1 +1,2 @@
 requests>=2.28.0
+msoffcrypto-tool>=5.0.0

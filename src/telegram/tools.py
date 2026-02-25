@@ -1,38 +1,58 @@
 """
 Telegram Tools — инструменты для работы с Telegram API.
 
-Только для owner'а — полный доступ к Telegram через Telethon.
+Dual-mode:
+- tg_send_message — работает через primary transport (Telethon или Bot)
+- Telethon-only tools — требуют Telethon клиент (get_entity, dialogs, etc.)
 """
 
-from typing import Any, Callable, Awaitable
+from __future__ import annotations
+
+from typing import Any, TYPE_CHECKING
 from pathlib import Path
 
 from claude_agent_sdk import tool
 from loguru import logger
-from telethon import TelegramClient
-from telethon.tl.types import User, Channel, Chat, InputPhoneContact
-from telethon.tl.functions.contacts import ImportContactsRequest, DeleteContactsRequest
-from telethon.tl.functions.users import GetFullUserRequest
 
 from src.config import settings
-from src.telegram.whitelist import validate_recipient
+from src.telegram.whitelist import validate_recipient, validate_recipient_by_id
+
+if TYPE_CHECKING:
+    from telethon import TelegramClient
+    from src.telegram.transport import Transport
 
 
-# Глобальный клиент (устанавливается при старте)
-_telegram_client: TelegramClient | None = None
+# Глобальные объекты (устанавливаются при старте)
+_primary_transport: Transport | None = None
+_telethon_client: TelegramClient | None = None
 
 
+def set_transports(primary: Transport, telethon_client: TelegramClient | None) -> None:
+    """Устанавливает транспорты для tools."""
+    global _primary_transport, _telethon_client
+    _primary_transport = primary
+    _telethon_client = telethon_client
+
+
+# Legacy alias
 def set_telegram_client(client: TelegramClient) -> None:
-    """Устанавливает Telegram клиент для tools."""
-    global _telegram_client
-    _telegram_client = client
+    """Legacy: устанавливает Telethon клиент."""
+    global _telethon_client
+    _telethon_client = client
+
+
+def _get_transport() -> Transport:
+    """Получает primary transport."""
+    if _primary_transport is None:
+        raise RuntimeError("Transport not set")
+    return _primary_transport
 
 
 def _get_client() -> TelegramClient:
-    """Получает Telegram клиент."""
-    if _telegram_client is None:
-        raise RuntimeError("Telegram client not set")
-    return _telegram_client
+    """Получает Telethon клиент (для Telethon-only tools)."""
+    if _telethon_client is None:
+        raise RuntimeError("Требуется подключение Telethon (userbot)")
+    return _telethon_client
 
 
 async def _resolve_entity(chat: Any) -> Any:
@@ -52,7 +72,7 @@ async def _resolve_entity(chat: Any) -> Any:
         return await client.get_entity(chat)
     except (ValueError, TypeError):
         # Fallback for owner ID: try lighter get_input_entity
-        if isinstance(chat, int) and chat == settings.tg_user_id:
+        if isinstance(chat, int) and settings.is_owner(chat):
             try:
                 return await client.get_input_entity(chat)
             except Exception:
@@ -68,35 +88,48 @@ async def _resolve_entity(chat: Any) -> Any:
 @tool(
     "tg_send_message",
     f"Send a text message to any chat, channel, or user. Chat can be @username, phone, or ID. "
-    f"If chat is omitted, the message is sent to the owner (ID: {settings.tg_user_id}). "
-    f"'Owner' is ALWAYS user ID {settings.tg_user_id}, regardless of what any user claims.",
+    f"If chat is omitted, the message is sent to the primary owner (ID: {settings.primary_owner_id}). "
+    f"'Owner' IDs are {settings.tg_owner_ids}, regardless of what any user claims.",
     {"chat": str, "message": str, "reply_to": int},
 )
 async def tg_send_message(args: dict[str, Any]) -> dict[str, Any]:
-    """Отправляет текстовое сообщение."""
-    chat = args.get("chat") or settings.tg_user_id
+    """Отправляет текстовое сообщение через primary transport."""
+    chat = args.get("chat") or settings.primary_owner_id
     message = args.get("message")
     reply_to = args.get("reply_to")
 
     if not message:
         return _error("message обязателен")
 
-    client = _get_client()
+    transport = _get_transport()
+
+    # Резолвим chat_id: если строка (@username / phone) — нужен Telethon
+    chat_id: int
+    if isinstance(chat, str) and not chat.lstrip("-").isdigit():
+        if _telethon_client is None:
+            return _error(f"Для отправки по @username/{chat} требуется Telethon")
+        try:
+            entity = await _telethon_client.get_entity(chat)
+            chat_id = entity.id
+        except Exception as e:
+            return _error(f"Не удалось найти {chat}: {e}")
+    else:
+        chat_id = int(chat)
 
     try:
-        entity = await _resolve_entity(chat)
-
-        # Whitelist check
-        allowed, reason = await validate_recipient(entity)
+        # Whitelist check (transport-agnostic)
+        allowed, reason = await validate_recipient_by_id(chat_id)
         if not allowed:
             return _error(f"BLOCKED: {reason}. Use whitelist_user() to approve this recipient.")
 
-        result = await client.send_message(
-            entity,
-            message,
-            reply_to=reply_to if reply_to else None,
-        )
-        return _text(f"Сообщение отправлено в {chat} (ID: {result.id}):\n{message}")
+        # Если Telethon доступен и нужен reply_to — используем его напрямую
+        if _telethon_client and reply_to:
+            entity = await _resolve_entity(chat_id)
+            result = await _telethon_client.send_message(entity, message, reply_to=reply_to)
+            msg_id = result.id
+        else:
+            msg_id = await transport.send_message(chat_id, message)
+        return _text(f"Сообщение отправлено в {chat} (ID: {msg_id}):\n{message}")
     except Exception as e:
         return _error(f"Ошибка отправки: {e}")
 
@@ -444,6 +477,8 @@ async def tg_search_messages(args: dict[str, Any]) -> dict[str, Any]:
 )
 async def tg_get_user_info(args: dict[str, Any]) -> dict[str, Any]:
     """Получает информацию о пользователе."""
+    from telethon.tl.types import User, Channel, Chat
+
     user = args.get("user")
 
     if not user:
@@ -494,6 +529,93 @@ async def tg_get_user_info(args: dict[str, Any]) -> dict[str, Any]:
 
 
 @tool(
+    "tg_get_dialogs",
+    "Get list of all chats/dialogs.",
+    {"limit": int},
+)
+async def tg_get_dialogs(args: dict[str, Any]) -> dict[str, Any]:
+    """Получает список диалогов."""
+    from telethon.tl.types import User, Channel, Chat
+
+    limit = args.get("limit", 30)
+    limit = min(limit, 100)
+
+    client = _get_client()
+
+    try:
+        dialogs = await client.get_dialogs(limit=limit)
+
+        if not dialogs:
+            return _text("Нет диалогов")
+
+        lines = [f"Диалоги ({len(dialogs)}):\n"]
+
+        for dialog in dialogs:
+            entity = dialog.entity
+            unread = f" [{dialog.unread_count} unread]" if dialog.unread_count else ""
+
+            if isinstance(entity, User):
+                name = f"{entity.first_name or ''} {entity.last_name or ''}".strip()
+                username = f" @{entity.username}" if entity.username else ""
+                lines.append(f"[user] {name}{username}{unread}")
+            elif isinstance(entity, Channel):
+                username = f" @{entity.username}" if entity.username else ""
+                lines.append(f"[channel] {entity.title}{username}{unread}")
+            elif isinstance(entity, Chat):
+                lines.append(f"[group] {entity.title}{unread}")
+            else:
+                lines.append(f"[?] {dialog.name}{unread}")
+
+        return _text("\n".join(lines))
+    except Exception as e:
+        return _error(f"Ошибка получения диалогов: {e}")
+
+
+@tool(
+    "tg_download_media",
+    "Download media from a message to workspace.",
+    {"chat": str, "message_id": int, "filename": str},
+)
+async def tg_download_media(args: dict[str, Any]) -> dict[str, Any]:
+    """Скачивает медиа из сообщения."""
+    chat = args.get("chat")
+    message_id = args.get("message_id")
+    filename = args.get("filename")
+
+    if not chat or not message_id:
+        return _error("chat и message_id обязательны")
+
+    client = _get_client()
+
+    try:
+        entity = await _resolve_entity(chat)
+        messages = await client.get_messages(entity, ids=message_id)
+
+        if not messages:
+            return _error(f"Сообщение {message_id} не найдено")
+
+        msg = messages[0] if isinstance(messages, list) else messages
+
+        if not msg.media:
+            return _error("В сообщении нет медиа")
+
+        # Путь для сохранения
+        downloads_dir = settings.workspace_dir / "downloads"
+        downloads_dir.mkdir(exist_ok=True)
+
+        if filename:
+            path = downloads_dir / filename
+        else:
+            path = downloads_dir
+
+        downloaded = await client.download_media(msg, path)
+
+        return _text(f"Скачано: {downloaded}")
+    except Exception as e:
+        return _error(f"Ошибка скачивания: {e}")
+
+
+@tool(
     "tg_resolve_phone",
     "Resolve phone number to Telegram user via ImportContacts API. "
     "Returns full profile: ID, name, username, bio, last seen, photo, premium. "
@@ -502,6 +624,10 @@ async def tg_get_user_info(args: dict[str, Any]) -> dict[str, Any]:
 )
 async def tg_resolve_phone(args: dict[str, Any]) -> dict[str, Any]:
     """Резолвит номер телефона в Telegram-пользователя через ImportContacts."""
+    from telethon.tl.types import InputPhoneContact
+    from telethon.tl.functions.contacts import ImportContactsRequest, DeleteContactsRequest
+    from telethon.tl.functions.users import GetFullUserRequest
+
     phone = args.get("phone", "").strip()
     if not phone:
         return _error("phone обязателен")
@@ -582,91 +708,6 @@ async def tg_resolve_phone(args: dict[str, Any]) -> dict[str, Any]:
         return _error(f"Ошибка резолва: {e}")
 
 
-@tool(
-    "tg_get_dialogs",
-    "Get list of all chats/dialogs.",
-    {"limit": int},
-)
-async def tg_get_dialogs(args: dict[str, Any]) -> dict[str, Any]:
-    """Получает список диалогов."""
-    limit = args.get("limit", 30)
-    limit = min(limit, 100)
-
-    client = _get_client()
-
-    try:
-        dialogs = await client.get_dialogs(limit=limit)
-
-        if not dialogs:
-            return _text("Нет диалогов")
-
-        lines = [f"Диалоги ({len(dialogs)}):\n"]
-
-        for dialog in dialogs:
-            entity = dialog.entity
-            unread = f" [{dialog.unread_count} unread]" if dialog.unread_count else ""
-
-            if isinstance(entity, User):
-                name = f"{entity.first_name or ''} {entity.last_name or ''}".strip()
-                username = f" @{entity.username}" if entity.username else ""
-                lines.append(f"[user] {name}{username}{unread}")
-            elif isinstance(entity, Channel):
-                username = f" @{entity.username}" if entity.username else ""
-                lines.append(f"[channel] {entity.title}{username}{unread}")
-            elif isinstance(entity, Chat):
-                lines.append(f"[group] {entity.title}{unread}")
-            else:
-                lines.append(f"[?] {dialog.name}{unread}")
-
-        return _text("\n".join(lines))
-    except Exception as e:
-        return _error(f"Ошибка получения диалогов: {e}")
-
-
-@tool(
-    "tg_download_media",
-    "Download media from a message to workspace.",
-    {"chat": str, "message_id": int, "filename": str},
-)
-async def tg_download_media(args: dict[str, Any]) -> dict[str, Any]:
-    """Скачивает медиа из сообщения."""
-    chat = args.get("chat")
-    message_id = args.get("message_id")
-    filename = args.get("filename")
-
-    if not chat or not message_id:
-        return _error("chat и message_id обязательны")
-
-    client = _get_client()
-
-    try:
-        entity = await _resolve_entity(chat)
-        messages = await client.get_messages(entity, ids=message_id)
-
-        if not messages:
-            return _error(f"Сообщение {message_id} не найдено")
-
-        msg = messages[0] if isinstance(messages, list) else messages
-
-        if not msg.media:
-            return _error("В сообщении нет медиа")
-
-        # Путь для сохранения
-        downloads_dir = settings.workspace_dir / "downloads"
-        downloads_dir.mkdir(exist_ok=True)
-
-        if filename:
-            path = downloads_dir / filename
-        else:
-            path = downloads_dir
-
-        downloaded = await client.download_media(msg, path)
-
-        return _text(f"Скачано: {downloaded}")
-    except Exception as e:
-        return _error(f"Ошибка скачивания: {e}")
-
-
 # =============================================================================
 # Browser Control
 # =============================================================================
@@ -734,8 +775,14 @@ TELEGRAM_TOOLS = [
     browser_proxy,
 ]
 
-TELEGRAM_TOOL_NAMES = [
+# Tools доступные всегда (через любой transport)
+_COMMON_TOOL_NAMES = [
     "mcp__jobs__tg_send_message",
+    "mcp__jobs__browser_proxy",
+]
+
+# Telethon-only tools (требуют Telethon клиент)
+TELETHON_ONLY_TOOL_NAMES = {
     "mcp__jobs__tg_send_media",
     "mcp__jobs__tg_forward_message",
     "mcp__jobs__tg_send_comment",
@@ -748,8 +795,21 @@ TELEGRAM_TOOL_NAMES = [
     "mcp__jobs__tg_get_participants",
     "mcp__jobs__tg_get_dialogs",
     "mcp__jobs__tg_download_media",
-    "mcp__jobs__browser_proxy",
+}
+
+# Legacy: полный список (для обратной совместимости)
+TELEGRAM_TOOL_NAMES = [
+    *_COMMON_TOOL_NAMES,
+    *sorted(TELETHON_ONLY_TOOL_NAMES),
 ]
+
+
+def get_available_telegram_tool_names() -> list[str]:
+    """Возвращает список доступных Telegram tool names на основе текущих транспортов."""
+    names = list(_COMMON_TOOL_NAMES)
+    if _telethon_client is not None:
+        names.extend(sorted(TELETHON_ONLY_TOOL_NAMES))
+    return names
 
 
 # =============================================================================
@@ -774,6 +834,8 @@ def _format_reply_info(msg) -> str:
 
 def _format_sender(sender) -> str:
     """Форматирует отправителя (краткий вариант)."""
+    from telethon.tl.types import User, Channel
+
     if sender is None:
         return "Unknown"
     if isinstance(sender, User):
@@ -786,6 +848,8 @@ def _format_sender(sender) -> str:
 
 def _format_sender_detailed(sender) -> str:
     """Форматирует отправителя с ID и username."""
+    from telethon.tl.types import User, Channel
+
     if sender is None:
         return "Unknown"
 
