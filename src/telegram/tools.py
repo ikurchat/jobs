@@ -289,7 +289,15 @@ async def tg_read_channel(args: dict[str, Any]) -> dict[str, Any]:
             if msg.replies and msg.replies.comments:
                 comments_str = f" | {msg.replies.replies} comments"
 
-            lines.append(f"[{msg.id}] {date}{views}{comments_str}\n{text}{reactions_str}\n")
+            # Forward
+            fwd_str = ""
+            if msg.fwd_from:
+                fwd_name = msg.fwd_from.from_name or ""
+                if not fwd_name and msg.fwd_from.from_id:
+                    fwd_name = f"ID:{msg.fwd_from.from_id}"
+                fwd_str = f" \u2934 {fwd_name}" if fwd_name else " \u2934 fwd"
+
+            lines.append(f"[{msg.id}] {date}{views}{comments_str}{fwd_str}\n{text}{reactions_str}\n")
 
         return _text("\n".join(lines))
     except Exception as e:
@@ -330,8 +338,11 @@ async def tg_read_comments(args: dict[str, Any]) -> dict[str, Any]:
             sender = await msg.get_sender()
             sender_info = _format_sender_detailed(sender)
             date = msg.date.strftime("%d.%m %H:%M")
+            reply_str = ""
+            if msg.reply_to_msg_id and msg.reply_to_msg_id != post_id:
+                reply_str = f" \u21a9 [{msg.reply_to_msg_id}]"
             text = msg.text[:150] + "..." if msg.text and len(msg.text) > 150 else (msg.text or "[медиа]")
-            lines.append(f"{sender_info} ({date}):\n{text}\n")
+            lines.append(f"{sender_info} ({date}){reply_str}:\n{text}\n")
 
         return _text("\n".join(lines))
     except Exception as e:
@@ -367,8 +378,10 @@ async def tg_read_chat(args: dict[str, Any]) -> dict[str, Any]:
             sender = await msg.get_sender()
             name = _format_sender(sender)
             date = msg.date.strftime("%d.%m %H:%M")
+            ri = _format_reply_info(msg)
+            meta = f" {ri}" if ri else ""
             text = msg.text[:200] + "..." if msg.text and len(msg.text) > 200 else (msg.text or "[медиа]")
-            lines.append(f"[{msg.id}] {name} ({date}):\n{text}\n")
+            lines.append(f"[{msg.id}] {name} ({date}){meta}:\n{text}\n")
 
         return _text("\n".join(lines))
     except Exception as e:
@@ -409,8 +422,10 @@ async def tg_search_messages(args: dict[str, Any]) -> dict[str, Any]:
             sender = await msg.get_sender()
             name = _format_sender(sender)
             date = msg.date.strftime("%d.%m %H:%M")
+            ri = _format_reply_info(msg)
+            meta = f" {ri}" if ri else ""
             text = msg.text[:150] + "..." if msg.text and len(msg.text) > 150 else (msg.text or "[медиа]")
-            lines.append(f"[{msg.id}] {name} ({date}):\n{text}\n")
+            lines.append(f"[{msg.id}] {name} ({date}){meta}:\n{text}\n")
 
         return _text("\n".join(lines))
     except Exception as e:
@@ -507,7 +522,7 @@ async def tg_resolve_phone(args: dict[str, Any]) -> dict[str, Any]:
         contact = InputPhoneContact(
             client_id=0,
             phone=phone_clean,
-            first_name="lookup",
+            first_name="\u200b",
             last_name="",
         )
         result = await client(ImportContactsRequest(contacts=[contact]))
@@ -516,6 +531,13 @@ async def tg_resolve_phone(args: dict[str, Any]) -> dict[str, Any]:
             return _text(f"Номер {phone_clean} не привязан к Telegram-аккаунту")
 
         user = result.users[0]
+
+        # Re-fetch entity for clean profile data (ImportContacts contaminates name)
+        try:
+            user = await client.get_entity(user.id)
+        except Exception:
+            pass
+
         username = f"@{user.username}" if user.username else "нет"
         name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "нет"
         status = _format_status(user.status)
@@ -733,6 +755,21 @@ TELEGRAM_TOOL_NAMES = [
 # =============================================================================
 # Helpers
 # =============================================================================
+
+
+def _format_reply_info(msg) -> str:
+    """Форматирует reply/forward метаданные для read tools."""
+    parts = []
+    if msg.reply_to_msg_id:
+        parts.append(f"\u21a9 [{msg.reply_to_msg_id}]")
+    if msg.fwd_from:
+        name = ""
+        if msg.fwd_from.from_name:
+            name = msg.fwd_from.from_name
+        elif msg.fwd_from.from_id:
+            name = f"ID:{msg.fwd_from.from_id}"
+        parts.append(f"\u2934 {name}" if name else "\u2934 fwd")
+    return " ".join(parts)
 
 
 def _format_sender(sender) -> str:

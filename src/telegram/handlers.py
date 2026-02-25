@@ -335,21 +335,6 @@ class TelegramHandlers:
         if media_context:
             prompt = f"{media_context}\n\n{prompt}" if prompt else media_context
 
-        # Обработка пересланных сообщений — добавляем метку отправителя
-        if message.forward:
-            prefix = "[Переслано от: скрытый профиль]"
-            try:
-                fwd_sender = await message.forward.get_sender()
-                if fwd_sender:
-                    name = getattr(fwd_sender, 'first_name', '') or ''
-                    last = getattr(fwd_sender, 'last_name', '') or ''
-                    uname = getattr(fwd_sender, 'username', '') or ''
-                    uid = getattr(fwd_sender, 'id', '')
-                    prefix = f"[Переслано от: {name} {last} (@{uname}, ID: {uid})]"
-            except Exception:
-                pass
-            prompt = f"{prefix}\n{prompt}"
-
         logger.info(f"[{'owner' if is_owner else user_id}] Received: {prompt[:100]}...")
 
         # Обновляем инфо owner'а из реальных данных Telegram
@@ -768,6 +753,32 @@ class TelegramHandlers:
                     media_context = f"[Файл сохранён: {path}]"
             except Exception as e:
                 logger.error(f"Document save failed: {e}")
+
+        # Reply context
+        if message.reply_to_msg_id:
+            try:
+                original = await self._client.get_messages(
+                    message.chat_id, ids=message.reply_to_msg_id,
+                )
+                if original and original.text:
+                    text = f"[Ответ на: {original.text[:150]}]\n{text}"
+            except Exception:
+                pass
+
+        # Forward context
+        if message.forward:
+            prefix = "[Переслано от: скрытый профиль]"
+            try:
+                fwd_sender = await message.forward.get_sender()
+                if fwd_sender:
+                    fn = getattr(fwd_sender, 'first_name', '') or ''
+                    ln = getattr(fwd_sender, 'last_name', '') or ''
+                    un = getattr(fwd_sender, 'username', '') or ''
+                    uid = getattr(fwd_sender, 'id', '')
+                    prefix = f"[Переслано от: {fn} {ln} (@{un}, ID: {uid})]"
+            except Exception:
+                pass
+            text = f"{prefix}\n{text}"
 
         return text, media_context
 
