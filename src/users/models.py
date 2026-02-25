@@ -7,6 +7,9 @@ from datetime import datetime
 from typing import Literal
 import json
 
+# Valid actions for trusted users
+TRUSTED_ACTIONS = ("search", "browser", "schedule", "tasks", "documents")
+
 
 def _ensure_aware(dt: datetime) -> datetime:
     """Make naive datetime timezone-aware using local timezone."""
@@ -29,6 +32,8 @@ class ExternalUser:
     last_contact: datetime = field(default_factory=datetime.now)
     warnings_count: int = 0
     is_banned: bool = False
+    role: Literal["external", "trusted"] = "external"
+    allowed_actions: list[str] = field(default_factory=list)
 
     @property
     def display_name(self) -> str:

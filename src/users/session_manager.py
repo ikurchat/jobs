@@ -64,6 +64,7 @@ class UserSession:
         self._is_querying: bool = False
         self._client: ClaudeSDKClient | None = None
         self._query_lock: asyncio.Lock = asyncio.Lock()
+        self._browser_enabled: bool = False
 
         from src.tools import create_tools_server
         self._tools_server = create_tools_server()
@@ -154,6 +155,22 @@ class UserSession:
             external_servers = mcp_config.to_mcp_json()
             mcp_servers.update(external_servers)
 
+            mcp_servers["browser"] = {
+                "command": "playwright-cdp-wrapper",
+                "args": [
+                    settings.browser_cdp_url,
+                    "--timeout-action", "5000",
+                    "--timeout-navigation", "15000",
+                    "--ignore-https-errors",
+                ],
+                "env": {
+                    "NO_PROXY": "browser,localhost,127.0.0.1",
+                    "HTTP_PROXY": "",
+                    "HTTPS_PROXY": "",
+                },
+            }
+
+        if self._browser_enabled and "browser" not in mcp_servers:
             mcp_servers["browser"] = {
                 "command": "playwright-cdp-wrapper",
                 "args": [
@@ -433,6 +450,7 @@ class SessionManager:
 
         self._owner_prompt: str | None = None
         self._external_prompt_template: str | None = None
+        self._trusted_prompt_template: str | None = None
 
     def _get_owner_prompt(self) -> str:
         if self._owner_prompt is None:
@@ -460,30 +478,78 @@ class SessionManager:
             task_context="",  # task_context добавляется в prompt, не в system_prompt
         )
 
-    def get_session(self, telegram_id: int, user_display_name: str | None = None) -> UserSession:
+    def _get_trusted_prompt(self, telegram_id: int, user_display_name: str, allowed_actions: list[str]) -> str:
+        if self._trusted_prompt_template is None:
+            from src.users.prompts import TRUSTED_USER_PROMPT_TEMPLATE
+            self._trusted_prompt_template = TRUSTED_USER_PROMPT_TEMPLATE
+
+        owner_link = get_owner_link()
+        if owner_link:
+            contact_info = f"Ссылка на владельца: {owner_link}"
+        else:
+            contact_info = "Прямой контакт недоступен, только через бота."
+
+        from src.users.prompts import format_trusted_actions
+        actions_block = format_trusted_actions(allowed_actions)
+
+        return self._trusted_prompt_template.format(
+            telegram_id=telegram_id,
+            username=user_display_name,
+            owner_name=get_owner_display_name(),
+            owner_telegram_id=settings.tg_user_id,
+            owner_contact_info=contact_info,
+            allowed_actions_block=actions_block,
+            task_context="",
+        )
+
+    def get_session(
+        self,
+        telegram_id: int,
+        user_display_name: str | None = None,
+        user_role: str | None = None,
+        allowed_actions: list[str] | None = None,
+    ) -> UserSession:
         if telegram_id in self._sessions:
             return self._sessions[telegram_id]
 
         is_owner = telegram_id == settings.tg_user_id
+        display_name = user_display_name or str(telegram_id)
+        role = user_role or "external"
+        actions = allowed_actions or []
 
         if is_owner:
             system_prompt = self._get_owner_prompt()
+            model = settings.claude_model
+            allowed_tools_override = None
+        elif role == "trusted":
+            system_prompt = self._get_trusted_prompt(telegram_id, display_name, actions)
+            model = settings.claude_model_light
+            from src.tools import build_trusted_allowed_tools
+            allowed_tools_override = build_trusted_allowed_tools(actions)
         else:
-            display_name = user_display_name or str(telegram_id)
             system_prompt = self._get_external_prompt(telegram_id, display_name)
+            model = settings.claude_model_light
+            allowed_tools_override = None
 
-        model = settings.claude_model if is_owner else settings.claude_model_light
+        mcp_extra = {}
+        if role == "trusted" and "browser" in actions:
+            mcp_extra["_browser_enabled"] = True
 
         session = UserSession(
             telegram_id=telegram_id,
             session_dir=self._session_dir,
             system_prompt=system_prompt,
             is_owner=is_owner,
+            allowed_tools=allowed_tools_override,
             model_override=model,
         )
 
+        # Для trusted с browser — запоминаем флаг
+        if mcp_extra.get("_browser_enabled"):
+            session._browser_enabled = True
+
         self._sessions[telegram_id] = session
-        logger.info(f"Created session for {telegram_id} (owner={is_owner}, model={model})")
+        logger.info(f"Created session for {telegram_id} (owner={is_owner}, role={role}, model={model})")
 
         return session
 

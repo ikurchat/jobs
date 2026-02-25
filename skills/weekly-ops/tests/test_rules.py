@@ -35,14 +35,15 @@ def test_mandatory_items_detected():
     items = [{"description": "Какая-то задача"}]
     missing = check_mandatory_items(items)
     assert len(missing) > 0
-    assert any("Новикова" in m["description"] for m in missing)
+    assert any("Молотова" in m["description"] for m in missing)
 
 
 def test_mandatory_items_present():
     """When mandatory items are present, nothing should be missing."""
     items = [
-        {"description": "Контроль за деятельностью сотрудника, находящегося на испытательном сроке (Новикова Е.С.)"},
+        {"description": "Согласование Порядка мониторинга информационной безопасности (Молотова А.В.)"},
         {"description": "Мониторинг событий информационной безопасности"},
+        {"description": "Контроль за деятельностью стажёра (Ворожбит)"},
     ]
     missing = check_mandatory_items(items)
     assert len(missing) == 0

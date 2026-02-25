@@ -6,10 +6,10 @@ from services.plan_builder import build_plan
 
 
 def test_build_plan_includes_mandatory_items(sample_raw_data, config):
-    """Mandatory items (Новикова) must always be present."""
+    """Mandatory items (Молотова) must always be present."""
     items = build_plan(sample_raw_data, PeriodType.WEEKLY, config)
     descs = [it.description.lower() for it in items]
-    assert any("новикова" in d for d in descs), "Новикова should be in plan"
+    assert any("молотова" in d for d in descs), "Молотова should be in plan"
 
 
 def test_build_plan_excludes_цок(sample_raw_data, config):
@@ -49,6 +49,6 @@ def test_build_plan_dedup_existing(sample_raw_data, config):
     """Tasks already in plan_items should not be duplicated."""
     items = build_plan(sample_raw_data, PeriodType.WEEKLY, config)
     descs = [it.description for it in items]
-    # "Мониторинг событий ИБ" is both in tasks and plan_items
-    monitoring_count = sum(1 for d in descs if "мониторинг" in d.lower())
-    assert monitoring_count == 1, f"Мониторинг duplicated {monitoring_count} times"
+    # "Мониторинг событий ИБ" is both in tasks and plan_items — should not duplicate
+    exact_count = sum(1 for d in descs if "мониторинг событий" in d.lower())
+    assert exact_count == 1, f"'Мониторинг событий' duplicated {exact_count} times"

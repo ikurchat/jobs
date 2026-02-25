@@ -101,6 +101,28 @@ EXTERNAL_ALLOWED_TOOLS = [
     *[f"mcp__jobs__{name}" for name in EXTERNAL_USER_TOOL_NAMES],
 ]
 
+# Trusted users — external + дополнительные по actions
+TRUSTED_BASE_TOOLS = [*EXTERNAL_ALLOWED_TOOLS]
+
+TRUSTED_ACTION_TOOLS = {
+    "search": ["WebSearch", "WebFetch"],
+    "browser": BROWSER_TOOL_NAMES,
+    "schedule": ["mcp__jobs__schedule_task", "mcp__jobs__cancel_task"],
+    "tasks": ["mcp__jobs__list_tasks"],
+    "documents": ["Skill", "Read", "Write", "Edit"],
+}
+
+
+def build_trusted_allowed_tools(actions: list[str]) -> list[str]:
+    """Собирает список allowed_tools для trusted пользователя по его actions."""
+    tools = list(TRUSTED_BASE_TOOLS)
+    for action in actions:
+        extra = TRUSTED_ACTION_TOOLS.get(action, [])
+        for t in extra:
+            if t not in tools:
+                tools.append(t)
+    return tools
+
 # Heartbeat — только задачи + память
 HEARTBEAT_ALLOWED_TOOLS = [
     "mcp__jobs__list_tasks",

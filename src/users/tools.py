@@ -631,6 +631,71 @@ async def read_task_context(args: dict[str, Any]) -> dict[str, Any]:
 # Tool Collections
 # =============================================================================
 
+@tool(
+    "set_user_role",
+    "Set user role (external/trusted) and allowed actions. "
+    "Actions: search, browser, schedule, tasks, documents.",
+    {"user": str, "role": str, "actions": list},
+)
+async def set_user_role(args: dict[str, Any]) -> dict[str, Any]:
+    """Устанавливает роль и разрешённые действия."""
+    user_query = args.get("user")
+    role = args.get("role", "external")
+    actions = args.get("actions", [])
+
+    if not user_query:
+        return _error("user обязателен")
+
+    if role not in ("external", "trusted"):
+        return _error("role должен быть 'external' или 'trusted'")
+
+    from .models import TRUSTED_ACTIONS
+    invalid = [a for a in actions if a not in TRUSTED_ACTIONS]
+    if invalid:
+        return _error(f"Неизвестные действия: {invalid}. Допустимые: {TRUSTED_ACTIONS}")
+
+    repo = get_users_repository()
+    user = await repo.find_user(user_query)
+    if not user:
+        return _error(f"Пользователь '{user_query}' не найден")
+
+    await repo.set_user_role(user.telegram_id, role, actions if role == "trusted" else [])
+
+    # Сбрасываем сессию чтобы применить новые tools/prompt
+    from src.users import get_session_manager
+    await get_session_manager().reset_session(user.telegram_id)
+
+    actions_str = ", ".join(actions) if actions else "нет"
+    return _text(f"{user.display_name}: роль={role}, действия=[{actions_str}]. Сессия сброшена.")
+
+
+@tool(
+    "get_user_permissions",
+    "Show user role, allowed actions, warnings and ban status.",
+    {"user": str},
+)
+async def get_user_permissions(args: dict[str, Any]) -> dict[str, Any]:
+    """Показывает роль и права пользователя."""
+    user_query = args.get("user")
+    if not user_query:
+        return _error("user обязателен")
+
+    repo = get_users_repository()
+    user = await repo.find_user(user_query)
+    if not user:
+        return _error(f"Пользователь '{user_query}' не найден")
+
+    actions_str = ", ".join(user.allowed_actions) if user.allowed_actions else "нет"
+    return _text(
+        f"{user.display_name}\n"
+        f"ID: {user.telegram_id}\n"
+        f"Роль: {user.role}\n"
+        f"Действия: [{actions_str}]\n"
+        f"Предупреждения: {user.warnings_count}\n"
+        f"Бан: {'да' if user.is_banned else 'нет'}"
+    )
+
+
 OWNER_TOOLS = [
     create_task,
     list_tasks,
@@ -640,6 +705,8 @@ OWNER_TOOLS = [
     ban_user,
     unban_user,
     read_task_context,
+    set_user_role,
+    get_user_permissions,
 ]
 
 EXTERNAL_USER_TOOLS = [

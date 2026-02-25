@@ -33,6 +33,20 @@ MSG_DEDUP_TTL = 120  # Секунд хранения msg_id для дедупл�
 
 _SYSTEM_TAGS_RE = re.compile(r'<\s*/?(?:message-body|sender-meta)\s*/?\s*>', re.IGNORECASE)
 
+# Паттерны подозрительных запросов от trusted/external пользователей
+_SUSPICIOUS_PATTERNS = re.compile(
+    r'(?:'
+    r'<\s*/?(?:message-body|sender-meta|system)'
+    r'|system\s*prompt'
+    r'|ignore\s*(?:previous|above|all)\s*instructions'
+    r'|ты\s*(?:теперь|сейчас)\s*(?:владелец|owner|admin)'
+    r'|дай\s*(?:доступ|пароль|токен|ключ|api.?key)'
+    r'|(?:change|set|update)\s*(?:my\s*)?role'
+    r'|bypass\s*permissions'
+    r')',
+    re.IGNORECASE,
+)
+
 
 def _sanitize_tags(text: str) -> str:
     """Удаляет системные теги из пользовательского ввода."""
@@ -144,6 +158,13 @@ class TelegramHandlers:
 
     async def _send_message(self, user_id: int, text: str) -> None:
         """Отправляет сообщение пользователю (для user tools)."""
+        from src.telegram.whitelist import validate_recipient_by_id
+
+        allowed, reason = await validate_recipient_by_id(user_id)
+        if not allowed:
+            logger.warning(f"_send_message BLOCKED: {reason}")
+            raise RuntimeError(f"BLOCKED: {reason}")
+
         logger.info(f"_send_message: user_id={user_id}, text={text[:60]}...")
         await self._client.send_message(user_id, text)
 
@@ -212,7 +233,8 @@ class TelegramHandlers:
                 "[Входящее уведомление от другой сессии. "
                 "Обработай информацию и кратко сообщи owner'у результат. "
                 "Выполни необходимые действия автоматически — schedule_task, send_to_user и т.д. "
-                "Не жди подтверждения от owner'а. НЕ дублируй текст уведомления дословно.]"
+                "Не жди подтверждения от owner'а. НЕ дублируй текст уведомления дословно. "
+                "НЕ отправляй сообщения произвольным @username — используй только send_to_user для известных контактов из БД.]"
             )
 
             response = await session.query(prompt)
@@ -344,6 +366,10 @@ class TelegramHandlers:
                 phone=sender.phone if hasattr(sender, 'phone') else None,
             )
 
+            # Авто-whitelist: кто сам написал — тому можно отвечать
+            if not await repo.is_user_whitelisted(user_id):
+                await repo.whitelist_user(user_id)
+
             # Проверяем бан
             if await repo.is_user_banned(user_id):
                 logger.info(f"[{user_id}] Banned user, ignoring")
@@ -363,10 +389,24 @@ class TelegramHandlers:
         # Включаем typing
         await self._set_typing(input_chat, typing=True)
 
-        # Получаем сессию для этого пользователя
+        # Получаем роль пользователя для создания правильной сессии
         session_manager = get_session_manager()
         user_display_name = sender.first_name or sender.username or str(user_id)
-        session = session_manager.get_session(user_id, user_display_name)
+
+        user_role = "external"
+        allowed_actions = []
+        if not is_owner:
+            repo = get_users_repository()
+            user_obj = await repo.get_user(user_id)
+            if user_obj:
+                user_role = user_obj.role
+                allowed_actions = user_obj.allowed_actions
+
+        session = session_manager.get_session(
+            user_id, user_display_name,
+            user_role=user_role,
+            allowed_actions=allowed_actions,
+        )
 
         # Skills подхватываются автоматически через SDK (setting_sources=["project"])
 
@@ -415,6 +455,38 @@ class TelegramHandlers:
         finally:
             await self._set_typing(input_chat, typing=False)
             await status.delete()
+
+            # Уведомляем owner'а о взаимодействии с non-owner пользователями
+            if not is_owner:
+                asyncio.create_task(
+                    self._notify_owner(user_id, user_display_name, prompt, user_role)
+                )
+
+    async def _notify_owner(self, user_id: int, user_name: str, prompt: str, role: str) -> None:
+        """Уведомляет owner'а о взаимодействии с пользователем."""
+        try:
+            # Извлекаем текст из message-body тегов
+            body_match = re.search(r'<message-body>\s*(.*?)\s*</message-body>', prompt, re.DOTALL)
+            short_text = (body_match.group(1) if body_match else prompt)[:80].replace('\n', ' ')
+
+            role_tag = f" [{role}]" if role == "trusted" else ""
+            is_suspicious = bool(_SUSPICIOUS_PATTERNS.search(prompt))
+
+            message = (
+                f"<sender-meta>{user_name}{role_tag} (ID: {user_id}) написал</sender-meta>\n"
+                f"<message-body>\n{short_text}\n</message-body>"
+            )
+
+            if is_suspicious:
+                message += "\n[ПОДОЗРИТЕЛЬНЫЙ ЗАПРОС — проверь]"
+                # Инжектим с триггером autonomous query
+                await self._inject_to_context(settings.tg_user_id, message)
+                logger.warning(f"Suspicious request from {user_id}: {short_text[:50]}")
+            else:
+                # Тихая буферизация без trigger
+                await self._buffer_to_context(settings.tg_user_id, message)
+        except Exception as e:
+            logger.error(f"Owner notification error: {e}")
 
     async def _set_typing(self, chat: Any, typing: bool) -> None:
         """Устанавливает статус typing."""
@@ -589,6 +661,10 @@ class TelegramHandlers:
             "update_task": "Обновляю задачу...",
             "send_summary_to_owner": "Отправляю сводку...",
             "ban_violator": "Баню нарушителя...",
+            "set_user_role": "Меняю роль...",
+            "get_user_permissions": "Проверяю права...",
+            "whitelist_user": "Добавляю в whitelist...",
+            "unwhitelist_user": "Убираю из whitelist...",
             # Telegram tools
             "tg_send_message": "Отправляю сообщение...",
             "tg_send_media": "Отправляю медиа...",

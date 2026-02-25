@@ -5,9 +5,35 @@ Jobs — Personal AI Assistant.
 """
 
 import asyncio
+import shutil
 import sys
+from pathlib import Path
 
 from loguru import logger
+
+# Patch SDK to handle rate_limit_event gracefully.
+# SDK v0.1.39 raises MessageParseError for unknown message types, but
+# rate_limit_event is a normal informational event from Claude CLI (not fatal).
+# Without this patch the entire response stream is aborted on rate_limit_event.
+def _patch_sdk_message_parser() -> None:
+    from claude_agent_sdk._internal import client as _sdk_client
+    from claude_agent_sdk._internal import message_parser as _sdk_mp
+    from claude_agent_sdk._internal.message_parser import parse_message as _orig
+    from claude_agent_sdk.types import SystemMessage
+
+    def _patched_parse(data: dict) -> object:
+        if isinstance(data, dict) and data.get("type") == "rate_limit_event":
+            return SystemMessage(subtype="rate_limit_event", data=data)
+        return _orig(data)
+
+    # Patch both locations:
+    # 1. _internal/client.py imports parse_message at module level
+    _sdk_client.parse_message = _patched_parse
+    # 2. public client.py does `from ._internal.message_parser import parse_message`
+    #    inside receive_messages() at runtime
+    _sdk_mp.parse_message = _patched_parse
+
+_patch_sdk_message_parser()
 
 from src.config import settings, set_owner_info
 from src.telegram.client import create_client, load_session_string
@@ -21,6 +47,23 @@ from src.heartbeat import HeartbeatRunner
 from src.triggers import TriggerExecutor, TriggerManager, set_trigger_manager
 from src.triggers.sources.tg_channel import TelegramChannelTrigger
 from src.updater import Updater, AUTO_CHECK_INTERVAL
+
+
+CLAUDE_JSON = Path("/home/jobs/.claude.json")
+CLAUDE_BACKUPS = Path("/home/jobs/.claude/backups")
+
+
+def _restore_claude_json_if_needed() -> None:
+    """Восстанавливает .claude.json из бэкапа, если файла нет (SDK ищет его при старте)."""
+    if CLAUDE_JSON.exists():
+        return
+    if not CLAUDE_BACKUPS.is_dir():
+        return
+    backups = sorted(CLAUDE_BACKUPS.glob(".claude.json.backup.*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not backups:
+        return
+    shutil.copy(backups[0], CLAUDE_JSON)
+    logger.info(f"Restored {CLAUDE_JSON} from backup")
 
 
 def setup_logging() -> None:
@@ -41,6 +84,9 @@ async def main() -> None:
     # Инициализируем память (создаёт структуру файлов)
     memory_storage = get_storage()
     logger.info(f"Memory initialized at {settings.workspace_dir}")
+
+    # Восстановить .claude.json из бэкапа, если SDK его ожидает
+    _restore_claude_json_if_needed()
 
     # Setup при первом запуске
     if not is_telegram_configured() or not is_claude_configured():

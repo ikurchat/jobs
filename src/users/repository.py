@@ -64,6 +64,16 @@ class UsersRepository:
         except sqlite3.OperationalError:
             pass  # column already exists
 
+        # Миграция: trusted roles
+        try:
+            await self._db.execute("ALTER TABLE external_users ADD COLUMN role TEXT DEFAULT 'external'")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            await self._db.execute("ALTER TABLE external_users ADD COLUMN allowed_actions TEXT DEFAULT '[]'")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
         # Unified tasks table
         await self._db.execute("""
             CREATE TABLE IF NOT EXISTS tasks (
@@ -419,6 +429,16 @@ class UsersRepository:
         return [self._row_to_user(row) for row in await cursor.fetchall()]
 
     def _row_to_user(self, row: aiosqlite.Row) -> ExternalUser:
+        import json as _json
+        keys = row.keys()
+
+        allowed_actions = []
+        if "allowed_actions" in keys and row["allowed_actions"]:
+            try:
+                allowed_actions = _json.loads(row["allowed_actions"])
+            except (ValueError, TypeError):
+                allowed_actions = []
+
         return ExternalUser(
             telegram_id=row["telegram_id"],
             username=row["username"],
@@ -428,8 +448,10 @@ class UsersRepository:
             notes=row["notes"] or "",
             first_contact=datetime.fromisoformat(row["first_contact"]) if row["first_contact"] else datetime.now(),
             last_contact=datetime.fromisoformat(row["last_contact"]) if row["last_contact"] else datetime.now(),
-            warnings_count=row["warnings_count"] if "warnings_count" in row.keys() else 0,
-            is_banned=bool(row["is_banned"]) if "is_banned" in row.keys() else False,
+            warnings_count=row["warnings_count"] if "warnings_count" in keys else 0,
+            is_banned=bool(row["is_banned"]) if "is_banned" in keys else False,
+            role=row["role"] if "role" in keys and row["role"] else "external",
+            allowed_actions=allowed_actions,
         )
 
     # =========================================================================
@@ -508,6 +530,37 @@ class UsersRepository:
             "SELECT * FROM external_users WHERE is_banned = 1"
         )
         return [self._row_to_user(row) for row in await cursor.fetchall()]
+
+    # =========================================================================
+    # Trusted Roles
+    # =========================================================================
+
+    async def set_user_role(
+        self,
+        telegram_id: int,
+        role: str,
+        allowed_actions: list[str] | None = None,
+    ) -> bool:
+        """Устанавливает роль и разрешённые действия пользователю."""
+        import json as _json
+        db = await self._get_db()
+        actions_json = _json.dumps(allowed_actions or [], ensure_ascii=False)
+        cursor = await db.execute(
+            "UPDATE external_users SET role = ?, allowed_actions = ? WHERE telegram_id = ?",
+            (role, actions_json, telegram_id),
+        )
+        await db.commit()
+        if cursor.rowcount > 0:
+            logger.info(f"User {telegram_id} role={role} actions={allowed_actions}")
+            return True
+        return False
+
+    async def get_user_role(self, telegram_id: int) -> tuple[str, list[str]]:
+        """Возвращает (role, allowed_actions) пользователя."""
+        user = await self.get_user(telegram_id)
+        if user:
+            return user.role, user.allowed_actions
+        return "external", []
 
     # =========================================================================
     # Tasks

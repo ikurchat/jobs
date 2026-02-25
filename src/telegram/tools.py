@@ -10,9 +10,12 @@ from pathlib import Path
 from claude_agent_sdk import tool
 from loguru import logger
 from telethon import TelegramClient
-from telethon.tl.types import User, Channel, Chat
+from telethon.tl.types import User, Channel, Chat, InputPhoneContact
+from telethon.tl.functions.contacts import ImportContactsRequest, DeleteContactsRequest
+from telethon.tl.functions.users import GetFullUserRequest
 
 from src.config import settings
+from src.telegram.whitelist import validate_recipient
 
 
 # Глобальный клиент (устанавливается при старте)
@@ -30,6 +33,31 @@ def _get_client() -> TelegramClient:
     if _telegram_client is None:
         raise RuntimeError("Telegram client not set")
     return _telegram_client
+
+
+async def _resolve_entity(chat: Any) -> Any:
+    """Resolves chat identifier to Telethon entity.
+
+    Handles numeric strings (Telethon treats them as phone numbers,
+    but we need them as user IDs) and provides InputPeerUser fallback
+    for the owner when entity cache is empty.
+    """
+    client = _get_client()
+
+    # Numeric strings → int (critical: Telethon treats "944426697" as phone)
+    if isinstance(chat, str) and chat.lstrip("-").isdigit():
+        chat = int(chat)
+
+    try:
+        return await client.get_entity(chat)
+    except (ValueError, TypeError):
+        # Fallback for owner ID: try lighter get_input_entity
+        if isinstance(chat, int) and chat == settings.tg_user_id:
+            try:
+                return await client.get_input_entity(chat)
+            except Exception:
+                pass
+        raise
 
 
 # =============================================================================
@@ -56,7 +84,13 @@ async def tg_send_message(args: dict[str, Any]) -> dict[str, Any]:
     client = _get_client()
 
     try:
-        entity = await client.get_entity(chat)
+        entity = await _resolve_entity(chat)
+
+        # Whitelist check
+        allowed, reason = await validate_recipient(entity)
+        if not allowed:
+            return _error(f"BLOCKED: {reason}. Use whitelist_user() to approve this recipient.")
+
         result = await client.send_message(
             entity,
             message,
@@ -88,7 +122,13 @@ async def tg_send_media(args: dict[str, Any]) -> dict[str, Any]:
     client = _get_client()
 
     try:
-        entity = await client.get_entity(chat)
+        entity = await _resolve_entity(chat)
+
+        # Whitelist check
+        allowed, reason = await validate_recipient(entity)
+        if not allowed:
+            return _error(f"BLOCKED: {reason}. Use whitelist_user() to approve this recipient.")
+
         result = await client.send_file(
             entity,
             path,
@@ -116,8 +156,13 @@ async def tg_forward_message(args: dict[str, Any]) -> dict[str, Any]:
     client = _get_client()
 
     try:
-        from_entity = await client.get_entity(from_chat)
-        to_entity = await client.get_entity(to_chat)
+        from_entity = await _resolve_entity(from_chat)
+        to_entity = await _resolve_entity(to_chat)
+
+        # Whitelist check on destination
+        allowed, reason = await validate_recipient(to_entity)
+        if not allowed:
+            return _error(f"BLOCKED: {reason}. Use whitelist_user() to approve this recipient.")
 
         result = await client.forward_messages(
             to_entity,
@@ -146,7 +191,7 @@ async def tg_send_comment(args: dict[str, Any]) -> dict[str, Any]:
     client = _get_client()
 
     try:
-        entity = await client.get_entity(channel)
+        entity = await _resolve_entity(channel)
         result = await client.send_message(
             entity,
             message,
@@ -175,7 +220,7 @@ async def tg_get_participants(args: dict[str, Any]) -> dict[str, Any]:
     client = _get_client()
 
     try:
-        entity = await client.get_entity(chat)
+        entity = await _resolve_entity(chat)
         participants = await client.get_participants(entity, limit=limit, search=search)
 
         if not participants:
@@ -217,7 +262,7 @@ async def tg_read_channel(args: dict[str, Any]) -> dict[str, Any]:
     client = _get_client()
 
     try:
-        entity = await client.get_entity(channel)
+        entity = await _resolve_entity(channel)
         messages = await client.get_messages(entity, limit=limit)
 
         if not messages:
@@ -269,7 +314,7 @@ async def tg_read_comments(args: dict[str, Any]) -> dict[str, Any]:
     client = _get_client()
 
     try:
-        entity = await client.get_entity(channel)
+        entity = await _resolve_entity(channel)
         comments = await client.get_messages(
             entity,
             reply_to=post_id,
@@ -310,7 +355,7 @@ async def tg_read_chat(args: dict[str, Any]) -> dict[str, Any]:
     client = _get_client()
 
     try:
-        entity = await client.get_entity(chat)
+        entity = await _resolve_entity(chat)
         messages = await client.get_messages(entity, limit=limit)
 
         if not messages:
@@ -348,7 +393,7 @@ async def tg_search_messages(args: dict[str, Any]) -> dict[str, Any]:
     client = _get_client()
 
     try:
-        entity = await client.get_entity(chat)
+        entity = await _resolve_entity(chat)
         messages = await client.get_messages(
             entity,
             search=query,
@@ -392,7 +437,7 @@ async def tg_get_user_info(args: dict[str, Any]) -> dict[str, Any]:
     client = _get_client()
 
     try:
-        entity = await client.get_entity(user)
+        entity = await _resolve_entity(user)
 
         if isinstance(entity, User):
             username = f"@{entity.username}" if entity.username else "нет"
@@ -431,6 +476,88 @@ async def tg_get_user_info(args: dict[str, Any]) -> dict[str, Any]:
 
     except Exception as e:
         return _error(f"Ошибка получения инфо: {e}")
+
+
+@tool(
+    "tg_resolve_phone",
+    "Resolve phone number to Telegram user via ImportContacts API. "
+    "Returns full profile: ID, name, username, bio, last seen, photo, premium. "
+    "After resolving you can send a message via tg_send_message using the returned ID.",
+    {"phone": str},
+)
+async def tg_resolve_phone(args: dict[str, Any]) -> dict[str, Any]:
+    """Резолвит номер телефона в Telegram-пользователя через ImportContacts."""
+    phone = args.get("phone", "").strip()
+    if not phone:
+        return _error("phone обязателен")
+
+    # Нормализация: оставляем только цифры и +
+    phone_clean = "".join(c for c in phone if c.isdigit() or c == "+")
+    if not phone_clean.startswith("+"):
+        if phone_clean.startswith("8") and len(phone_clean) == 11:
+            phone_clean = "+7" + phone_clean[1:]
+        elif not phone_clean.startswith("7"):
+            phone_clean = "+7" + phone_clean
+        else:
+            phone_clean = "+" + phone_clean
+
+    client = _get_client()
+
+    try:
+        contact = InputPhoneContact(
+            client_id=0,
+            phone=phone_clean,
+            first_name="lookup",
+            last_name="",
+        )
+        result = await client(ImportContactsRequest(contacts=[contact]))
+
+        if not result.users:
+            return _text(f"Номер {phone_clean} не привязан к Telegram-аккаунту")
+
+        user = result.users[0]
+        username = f"@{user.username}" if user.username else "нет"
+        name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "нет"
+        status = _format_status(user.status)
+        has_photo = "да" if user.photo else "нет"
+        premium = "да" if getattr(user, "premium", False) else "нет"
+        verified = "да" if getattr(user, "verified", False) else "нет"
+        bot = "да" if user.bot else "нет"
+
+        # Получаем bio через GetFullUser
+        bio = "нет"
+        try:
+            full = await client(GetFullUserRequest(user.id))
+            if full.full_user.about:
+                bio = full.full_user.about
+        except Exception:
+            pass
+
+        lines = [
+            "Установочные данные:",
+            f"Телефон: {phone_clean}",
+            f"Telegram ID: {user.id}",
+            f"Имя: {name}",
+            f"Username: {username}",
+            f"Bio: {bio}",
+            f"Статус: {status}",
+            f"Фото профиля: {has_photo}",
+            f"Premium: {premium}",
+            f"Верифицирован: {verified}",
+            f"Бот: {bot}",
+            "",
+            f"Для отправки сообщения: tg_send_message(chat={user.id}, text=...)",
+        ]
+
+        try:
+            await client(DeleteContactsRequest(id=[user.id]))
+        except Exception:
+            pass
+
+        return _text("\n".join(lines))
+
+    except Exception as e:
+        return _error(f"Ошибка резолва: {e}")
 
 
 @tool(
@@ -491,7 +618,7 @@ async def tg_download_media(args: dict[str, Any]) -> dict[str, Any]:
     client = _get_client()
 
     try:
-        entity = await client.get_entity(chat)
+        entity = await _resolve_entity(chat)
         messages = await client.get_messages(entity, ids=message_id)
 
         if not messages:
@@ -578,6 +705,7 @@ TELEGRAM_TOOLS = [
     tg_read_chat,
     tg_search_messages,
     tg_get_user_info,
+    tg_resolve_phone,
     tg_get_participants,
     tg_get_dialogs,
     tg_download_media,
@@ -594,6 +722,7 @@ TELEGRAM_TOOL_NAMES = [
     "mcp__jobs__tg_read_chat",
     "mcp__jobs__tg_search_messages",
     "mcp__jobs__tg_get_user_info",
+    "mcp__jobs__tg_resolve_phone",
     "mcp__jobs__tg_get_participants",
     "mcp__jobs__tg_get_dialogs",
     "mcp__jobs__tg_download_media",
