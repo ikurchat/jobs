@@ -276,7 +276,9 @@ class UserSession:
                     while self._incoming:
                         incoming_buf = self._consume_incoming()
                         follow_up = (
-                            f"{incoming_buf}[Продолжай с учётом новых сообщений. "
+                            f"{incoming_buf}"
+                            "[Продолжай с учётом новых сообщений. "
+                            "Если предыдущий ответ был прерван — сначала доответь на исходный запрос. "
                             "Выполни необходимые действия автоматически.]"
                         )
                         await client.query(follow_up)
@@ -301,6 +303,31 @@ class UserSession:
                 return "Ошибка: таймаут запроса"
 
             except Exception as e:
+                err_str = str(e)
+                if self._is_policy_error(err_str):
+                    logger.warning(f"Policy error [{self.telegram_id}], resetting session and retrying")
+                    await self._destroy_client(client)
+                    self._session_id = None
+                    if self._session_file.exists():
+                        self._session_file.unlink()
+                    text_parts.clear()
+                    try:
+                        client = await self._create_client()
+                        self._client = client
+                        async with asyncio.timeout(QUERY_TIMEOUT_SECONDS):
+                            await client.query(full_prompt)
+                            async for message in client.receive_response():
+                                if isinstance(message, AssistantMessage):
+                                    for block in message.content:
+                                        if isinstance(block, TextBlock):
+                                            text_parts.append(block.text)
+                                elif isinstance(message, ResultMessage):
+                                    if message.session_id:
+                                        self._save_session_id(message.session_id)
+                    except Exception as retry_err:
+                        logger.error(f"Retry failed [{self.telegram_id}]: {retry_err}")
+                        return f"Ошибка: {retry_err}"
+                    return text_parts[-1] if text_parts else "Нет ответа"
                 logger.error(f"Query error [{self.telegram_id}]: {type(e).__name__}: {e}")
                 return f"Ошибка: {e}"
 
@@ -319,6 +346,11 @@ class UserSession:
         if block.name == "Bash" and block.input.get("command"):
             return f"Bash:{block.input['command']}"
         return block.name
+
+    @staticmethod
+    def _is_policy_error(text: str) -> bool:
+        """Detects Claude API Usage Policy violation error."""
+        return "Usage Policy" in text or "unable to respond to this request" in text
 
     async def query_stream(self, prompt: str) -> AsyncIterator[tuple[str | None, str | None, bool]]:
         """
@@ -407,6 +439,36 @@ class UserSession:
             return
 
         except Exception as e:
+            err_str = str(e)
+            if self._is_policy_error(err_str):
+                logger.warning(f"Policy error [{self.telegram_id}], resetting session and retrying")
+                await self._destroy_client(client)
+                self._session_id = None
+                if self._session_file.exists():
+                    self._session_file.unlink()
+                text_buffer.clear()
+                try:
+                    client = await self._create_client()
+                    self._client = client
+                    async with asyncio.timeout(QUERY_TIMEOUT_SECONDS):
+                        await client.query(full_prompt)
+                        async for message in client.receive_response():
+                            if isinstance(message, AssistantMessage):
+                                for block in message.content:
+                                    if isinstance(block, TextBlock):
+                                        text_buffer.append(block.text)
+                                        yield (block.text, None, False)
+                                    elif isinstance(block, ToolUseBlock):
+                                        tool_display = self._format_tool_display(block)
+                                        yield (None, tool_display, False)
+                            elif isinstance(message, ResultMessage):
+                                if message.session_id:
+                                    self._save_session_id(message.session_id)
+                    yield (text_buffer[-1] if text_buffer else None, None, True)
+                except Exception as retry_err:
+                    logger.error(f"Retry failed [{self.telegram_id}]: {retry_err}")
+                    yield (f"Ошибка: {retry_err}", None, True)
+                return
             logger.error(f"Query error [{self.telegram_id}]: {type(e).__name__}: {e}")
             yield (f"Ошибка: {e}", None, True)
             return
