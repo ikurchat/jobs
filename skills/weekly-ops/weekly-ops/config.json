@@ -1,0 +1,78 @@
+{
+  "baserow": {
+    "tables": {
+      "employees": 833857,
+      "tasks": 833859,
+      "plan_items": 833860,
+      "regulatory_tracks": 833861,
+      "formulation_memory": 851056
+    }
+  },
+
+  "rules": {
+    "mandatory_items": [
+      {
+        "description": "Контроль за деятельностью сотрудника, находящегося на испытательном сроке (Молотова Е.С.)",
+        "deadline": "В течение недели",
+        "responsible": "Ярочкий Д.А."
+      },
+      {
+        "description": "Мониторинг событий информационной безопасности",
+        "deadline": "В течение недели",
+        "responsible": "Управление ИБ"
+      }
+    ],
+    "exclude_topics": [
+      "цок", "центр обеспечения кибербезопасности",
+      "доработка бота", "настройка скилл", "доработка скилл",
+      "обновление бота", "skills", "telegram bot", "claude", "ai assistant"
+    ],
+    "contractor_department": "СИТ",
+    "only_internal": true
+  },
+
+  "deadlines": {
+    "weekly_plan": "friday",
+    "weekly_report": "friday",
+    "monthly_plan": 20,
+    "monthly_report": 20,
+    "monthly_weekend_extension": true,
+    "monthly_weekend_max_day": 22,
+    "monthly_weekend_requires_owner_ok": true
+  },
+
+  "report": {
+    "columns": [
+      "№ п/п",
+      "Мероприятия",
+      "Сроки проведения",
+      "Ответственный",
+      "Отметка о выполнении"
+    ],
+    "approval_header": "УТВЕРЖДАЮ",
+    "font_name": "Times New Roman",
+    "font_size_pt": 12,
+    "title_font_size_pt": 14,
+    "page": {
+      "width_cm": 29.7,
+      "height_cm": 21.0,
+      "margin_left_cm": 3.0,
+      "margin_right_cm": 1.0,
+      "margin_top_cm": 2.0,
+      "margin_bottom_cm": 2.0
+    },
+    "col_widths_pct": [6, 38, 16, 20, 20]
+  },
+
+  "preview": {
+    "block_size": 5,
+    "circled_digits": ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
+  },
+
+  "formulation_memory": {
+    "match_threshold": 0.6,
+    "min_word_length": 3
+  },
+
+  "work_dir": "/dev/shm/weekly-ops"
+}

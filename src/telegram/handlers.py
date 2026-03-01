@@ -11,6 +11,7 @@ Telegram Handlers — обработка входящих сообщений.
 import asyncio
 import json
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,26 +28,12 @@ from src.telegram.transport import Transport, TransportMode, IncomingMessage
 from src.telegram import group_log
 
 MAX_TG_LENGTH = 4000
-TYPING_REFRESH_INTERVAL = 3.0
+TYPING_REFRESH_INTERVAL = 4.0  # Bot API typing expires after 5s
 LOADING_EMOJI_ID = 5255778087437617493
 MAX_DONE_LENGTH = 200
-MSG_DEDUP_TTL = 120  # Секунд хранения msg_id для дедупликации
+STATUS_EDIT_INTERVAL = 2.0  # Минимальный интервал между edit_message (секунды)
 
 _SYSTEM_TAGS_RE = re.compile(r'<\s*/?(?:message-body|sender-meta)\s*/?\s*>', re.IGNORECASE)
-
-# Паттерны подозрительных запросов от trusted/external пользователей
-_SUSPICIOUS_PATTERNS = re.compile(
-    r'(?:'
-    r'<\s*/?(?:message-body|sender-meta|system)'
-    r'|system\s*prompt'
-    r'|ignore\s*(?:previous|above|all)\s*instructions'
-    r'|ты\s*(?:теперь|сейчас)\s*(?:владелец|owner|admin)'
-    r'|дай\s*(?:доступ|пароль|токен|ключ|api.?key)'
-    r'|(?:change|set|update)\s*(?:my\s*)?role'
-    r'|bypass\s*permissions'
-    r')',
-    re.IGNORECASE,
-)
 
 
 def _sanitize_tags(text: str) -> str:
@@ -54,8 +41,41 @@ def _sanitize_tags(text: str) -> str:
     return _SYSTEM_TAGS_RE.sub('', text)
 
 
+class TypingLoop:
+    """Фоновый цикл typing — шлёт chat action каждые N секунд до остановки."""
+
+    def __init__(self, transport: Transport, chat_id: int, message_thread_id: int | None = None) -> None:
+        self._transport = transport
+        self._chat_id = chat_id
+        self._thread_id = message_thread_id
+        self._task: asyncio.Task | None = None
+
+    async def start(self) -> None:
+        if self._task is None:
+            await self._transport.set_typing(self._chat_id, typing=True, message_thread_id=self._thread_id)
+            self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+        await self._transport.set_typing(self._chat_id, typing=False, message_thread_id=self._thread_id)
+
+    async def _loop(self) -> None:
+        try:
+            while True:
+                await self._transport.set_typing(self._chat_id, typing=True, message_thread_id=self._thread_id)
+                await asyncio.sleep(TYPING_REFRESH_INTERVAL)
+        except asyncio.CancelledError:
+            pass
+
+
 class StatusTracker:
-    """Управляет статусным сообщением с двумя слотами: active (тул) и done (результат)."""
+    """Управляет статусным сообщением с throttle и dedup для защиты от flood control."""
 
     def __init__(self, transport: Transport, msg: IncomingMessage, is_premium: bool) -> None:
         self._transport = transport
@@ -64,20 +84,32 @@ class StatusTracker:
         self._status_msg_id: int | None = None
         self._active: str | None = None
         self._done: str | None = None
+        self._last_edit_time: float = 0.0
+        self._last_sent_text: str = ""
+        self._flush_task: asyncio.Task | None = None
 
     async def set_active(self, text: str) -> None:
         """Обновляет верхний слот (текущее действие)."""
         self._active = text
-        await self._update()
+        await self._throttled_update()
 
     async def set_done(self, text: str) -> None:
         """Обновляет нижний слот (результат предыдущего действия)."""
         self._done = text[:MAX_DONE_LENGTH] if len(text) > MAX_DONE_LENGTH else text
         if self._active:
-            await self._update()
+            await self._throttled_update()
+
+    async def flush(self) -> None:
+        """Гарантированно отправляет последнее состояние перед удалением."""
+        self._cancel_flush()
+        if self._status_msg_id is not None:
+            text, entities = self._render()
+            if text != self._last_sent_text:
+                await self._do_edit(text, entities)
 
     async def delete(self) -> None:
-        """Удаляет статусное сообщение."""
+        """Отправляет pending update и удаляет статусное сообщение."""
+        self._cancel_flush()
         if self._status_msg_id:
             try:
                 await self._transport.delete_message(self._msg.chat_id, self._status_msg_id)
@@ -85,19 +117,52 @@ class StatusTracker:
                 pass
             self._status_msg_id = None
 
-    async def _update(self) -> None:
+    async def _throttled_update(self) -> None:
         text, entities = self._render()
+
+        # Dedup: не редактировать если текст не изменился
+        if text == self._last_sent_text and self._status_msg_id is not None:
+            return
+
+        # Первое сообщение — отправить сразу
         if self._status_msg_id is None:
             self._status_msg_id = await self._transport.reply_with_entities(
                 self._msg, text, entities,
             )
-        else:
-            try:
-                await self._transport.edit_message(
-                    self._msg.chat_id, self._status_msg_id, text, entities,
-                )
-            except Exception:
-                pass
+            self._last_sent_text = text
+            self._last_edit_time = time.monotonic()
+            return
+
+        # Throttle: проверяем интервал
+        elapsed = time.monotonic() - self._last_edit_time
+        if elapsed >= STATUS_EDIT_INTERVAL:
+            self._cancel_flush()
+            await self._do_edit(text, entities)
+        elif self._flush_task is None or self._flush_task.done():
+            # Планируем отложенный edit
+            delay = STATUS_EDIT_INTERVAL - elapsed
+            self._flush_task = asyncio.create_task(self._deferred_flush(delay))
+
+    async def _deferred_flush(self, delay: float) -> None:
+        await asyncio.sleep(delay)
+        text, entities = self._render()
+        if text != self._last_sent_text and self._status_msg_id is not None:
+            await self._do_edit(text, entities)
+
+    async def _do_edit(self, text: str, entities: list | None) -> None:
+        try:
+            await self._transport.edit_message(
+                self._msg.chat_id, self._status_msg_id, text, entities,
+            )
+            self._last_sent_text = text
+            self._last_edit_time = time.monotonic()
+        except Exception:
+            pass
+
+    def _cancel_flush(self) -> None:
+        if self._flush_task and not self._flush_task.done():
+            self._flush_task.cancel()
+            self._flush_task = None
 
     def _render(self) -> tuple[str, list | None]:
         icon = "\u23f3" if self._is_premium else "\U0001fa9b"
@@ -120,7 +185,6 @@ class TelegramHandlers:
         self._is_premium: dict[TransportMode, bool] = {}
         self._updater = Updater()
         self._reply_targets: dict[str, IncomingMessage] = {}  # session_key → latest msg (для follow-up)
-        self._seen_msg_ids: dict[int, float] = {}  # msg_id → timestamp (дедупликация)
 
         # Настраиваем sender'ы для user tools
         set_telegram_sender(self._send_message)
@@ -163,13 +227,6 @@ class TelegramHandlers:
 
     async def _send_message(self, user_id: int, text: str) -> None:
         """Отправляет сообщение пользователю (для user tools)."""
-        from src.telegram.whitelist import validate_recipient_by_id
-
-        allowed, reason = await validate_recipient_by_id(user_id)
-        if not allowed:
-            logger.warning(f"_send_message BLOCKED: {reason}")
-            raise RuntimeError(f"BLOCKED: {reason}")
-
         logger.info(f"_send_message: user_id={user_id}, text={text[:60]}...")
         await self._primary.send_message(user_id, text)
 
@@ -265,19 +322,6 @@ class TelegramHandlers:
         if not msg.sender_id:
             return
 
-        # Дедупликация: Telethon может доставить одно сообщение несколько раз
-        # при reconnect (StringSession не персистит pts/qts/date)
-        msg_id = msg.message_id
-        now_ts = asyncio.get_event_loop().time()
-        self._seen_msg_ids = {
-            k: v for k, v in self._seen_msg_ids.items()
-            if now_ts - v < MSG_DEDUP_TTL
-        }
-        if msg_id in self._seen_msg_ids:
-            logger.debug(f"Duplicate message {msg_id}, skipping")
-            return
-        self._seen_msg_ids[msg_id] = now_ts
-
         user_id = msg.sender_id
         is_owner = settings.is_owner(user_id)
         transport = msg.transport
@@ -307,9 +351,9 @@ class TelegramHandlers:
             if not is_owner:
                 return
             session_manager = get_session_manager()
-            session = session_manager.get_session(user_id, channel=channel)
-            if session._is_querying and session._client:
-                await session._client.interrupt()
+            key = session_manager._make_key(user_id, channel)
+            session = session_manager._sessions.get(key)
+            if session and await session.try_interrupt():
                 await transport.reply(msg, "Остановлено.")
             else:
                 await transport.reply(msg, "Нечего останавливать.")
@@ -362,11 +406,6 @@ class TelegramHandlers:
                 last_name=msg.sender_last_name,
                 phone=msg.sender_phone,
             )
-
-            # Авто-whitelist: кто сам написал — тому можно отвечать
-            if not await repo.is_user_whitelisted(user_id):
-                await repo.whitelist_user(user_id)
-
             if await repo.is_user_banned(user_id):
                 logger.info(f"[{user_id}] Banned user, ignoring")
                 return
@@ -380,28 +419,10 @@ class TelegramHandlers:
         # Отмечаем как прочитанное
         await transport.mark_read(msg.chat_id, msg.message_id)
 
-        # Включаем typing
-        await transport.set_typing(msg.chat_id, typing=True)
-
-        # Получаем роль пользователя для создания правильной сессии
+        # Получаем сессию для этого пользователя + транспорта
         session_manager = get_session_manager()
         user_display_name = msg.sender_first_name or msg.sender_username or str(user_id)
-
-        user_role = "external"
-        allowed_actions: list[str] = []
-        if not is_owner:
-            repo = get_users_repository()
-            user_obj = await repo.get_user(user_id)
-            if user_obj:
-                user_role = user_obj.role
-                allowed_actions = user_obj.allowed_actions
-
-        session = session_manager.get_session(
-            user_id, user_display_name,
-            channel=channel,
-            user_role=user_role,
-            allowed_actions=allowed_actions,
-        )
+        session = session_manager.get_session(user_id, user_display_name, channel=channel)
 
         # Если сессия уже обрабатывает запрос — буферизуем в incoming
         if session._is_querying:
@@ -410,7 +431,8 @@ class TelegramHandlers:
             logger.info(f"[{'owner' if is_owner else user_id}] Buffered (session busy), queue: {len(session._incoming)}")
             return
 
-        last_typing = asyncio.get_event_loop().time()
+        typing = TypingLoop(transport, msg.chat_id, msg.message_thread_id)
+        await typing.start()
         status = StatusTracker(transport, msg, await self._check_premium(transport))
 
         try:
@@ -419,13 +441,12 @@ class TelegramHandlers:
                 new_msg = self._reply_targets.pop(session_key, None)
                 if new_msg:
                     await status.delete()
+                    await typing.stop()
                     msg = new_msg
+                    transport = new_msg.transport
+                    typing = TypingLoop(transport, msg.chat_id, msg.message_thread_id)
+                    await typing.start()
                     status = StatusTracker(new_msg.transport, new_msg, await self._check_premium(new_msg.transport))
-
-                now_time = asyncio.get_event_loop().time()
-                if now_time - last_typing > TYPING_REFRESH_INTERVAL:
-                    await transport.set_typing(msg.chat_id, typing=True)
-                    last_typing = now_time
 
                 if tool_name:
                     await status.set_active(self._format_tool(tool_name))
@@ -445,40 +466,8 @@ class TelegramHandlers:
             await transport.reply(msg, f"Ошибка: {e}")
 
         finally:
-            await transport.set_typing(msg.chat_id, typing=False)
+            await typing.stop()
             await status.delete()
-
-            # Уведомляем owner'а о взаимодействии с non-owner пользователями
-            if not is_owner:
-                asyncio.create_task(
-                    self._notify_owner(user_id, user_display_name, prompt, user_role)
-                )
-
-    async def _notify_owner(self, user_id: int, user_name: str, prompt: str, role: str) -> None:
-        """Уведомляет owner'а о взаимодействии с пользователем."""
-        try:
-            # Извлекаем текст из message-body тегов
-            body_match = re.search(r'<message-body>\s*(.*?)\s*</message-body>', prompt, re.DOTALL)
-            short_text = (body_match.group(1) if body_match else prompt)[:80].replace('\n', ' ')
-
-            role_tag = f" [{role}]" if role == "trusted" else ""
-            is_suspicious = bool(_SUSPICIOUS_PATTERNS.search(prompt))
-
-            message = (
-                f"<sender-meta>{user_name}{role_tag} (ID: {user_id}) написал</sender-meta>\n"
-                f"<message-body>\n{short_text}\n</message-body>"
-            )
-
-            if is_suspicious:
-                message += "\n[ПОДОЗРИТЕЛЬНЫЙ ЗАПРОС — проверь]"
-                # Инжектим с триггером autonomous query
-                await self._inject_to_context(settings.primary_owner_id, message)
-                logger.warning(f"Suspicious request from {user_id}: {short_text[:50]}")
-            else:
-                # Тихая буферизация без trigger
-                await self._buffer_to_context(settings.primary_owner_id, message)
-        except Exception as e:
-            logger.error(f"Owner notification error: {e}")
 
     async def _on_group_message(self, msg: IncomingMessage) -> None:
         """Обрабатывает сообщение из группового чата."""
@@ -524,6 +513,31 @@ class TelegramHandlers:
         if not text:
             return
 
+        # Команды в группе (после strip @bot)
+        cmd = text.strip().lower()
+        if cmd == "/clear":
+            session_manager = get_session_manager()
+            channel = transport.mode.value
+            await session_manager.reset_group_session(msg.chat_id, channel)
+            await transport.reply(msg, "Сессия группы сброшена.")
+            return
+        if cmd == "/help":
+            help_text = (
+                "`/stop` — прервать текущий запрос\n"
+                "`/clear` — сбросить сессию группы\n"
+            )
+            await transport.reply(msg, help_text)
+            return
+        if cmd == "/stop":
+            session_manager = get_session_manager()
+            channel = transport.mode.value
+            session = session_manager.find_group_session(msg.chat_id, channel)
+            if session and await session.try_interrupt():
+                await transport.reply(msg, "Остановлено.")
+            else:
+                await transport.reply(msg, "Нечего останавливать.")
+            return
+
         channel = transport.mode.value
         chat_title = ""
         # Пробуем получить название чата
@@ -553,19 +567,12 @@ class TelegramHandlers:
             logger.info(f"[group:{msg.chat_id}] Buffered (session busy), queue: {len(session._incoming)}")
             return
 
-        # Включаем typing
-        await transport.set_typing(msg.chat_id, typing=True)
-
-        last_typing = asyncio.get_event_loop().time()
+        typing = TypingLoop(transport, msg.chat_id, msg.message_thread_id)
+        await typing.start()
         status = StatusTracker(transport, msg, await self._check_premium(transport))
 
         try:
             async for response_text, tool_name, is_final in session.query_stream(prompt):
-                now_time = asyncio.get_event_loop().time()
-                if now_time - last_typing > TYPING_REFRESH_INTERVAL:
-                    await transport.set_typing(msg.chat_id, typing=True)
-                    last_typing = now_time
-
                 if tool_name:
                     await status.set_active(self._format_tool(tool_name))
                 elif response_text and not is_final:
@@ -584,7 +591,7 @@ class TelegramHandlers:
             await transport.reply(msg, f"Ошибка: {e}")
 
         finally:
-            await transport.set_typing(msg.chat_id, typing=False)
+            await typing.stop()
             await status.delete()
 
     async def _check_premium(self, transport: Transport) -> bool:
@@ -730,10 +737,6 @@ class TelegramHandlers:
             "list_users": "Список пользователей...",
             "ban_user": "Баню пользователя...",
             "unban_user": "Разбаниваю...",
-            "set_user_role": "Меняю роль...",
-            "get_user_permissions": "Проверяю права...",
-            "whitelist_user": "Добавляю в whitelist...",
-            "unwhitelist_user": "Убираю из whitelist...",
             # External user tools
             "get_my_tasks": "Мои задачи...",
             "update_task": "Обновляю задачу...",
@@ -858,29 +861,5 @@ class TelegramHandlers:
                         media_context = f"[Файл сохранён: {path}]"
             except Exception as e:
                 logger.error(f"Document save failed: {e}")
-
-        # Reply context — добавляем текст исходного сообщения
-        if msg.reply_to_message_id:
-            try:
-                raw = msg.raw
-                # aiogram: reply_to_message содержит полное сообщение
-                if hasattr(raw, "reply_to_message") and raw.reply_to_message:
-                    orig_text = raw.reply_to_message.text or raw.reply_to_message.caption or ""
-                    if orig_text:
-                        text = f"[Ответ на: {orig_text[:150]}]\n{text}"
-                # Telethon: нужен get_messages
-                elif hasattr(raw, "message") and hasattr(raw.message, "reply_to_msg_id"):
-                    try:
-                        from src.telegram.tools import _telethon_client
-                        if _telethon_client:
-                            original = await _telethon_client.get_messages(
-                                msg.chat_id, ids=msg.reply_to_message_id,
-                            )
-                            if original and original.text:
-                                text = f"[Ответ на: {original.text[:150]}]\n{text}"
-                    except Exception:
-                        pass
-            except Exception:
-                pass
 
         return text, media_context
