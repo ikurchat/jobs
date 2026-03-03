@@ -2,6 +2,7 @@
   "formatting": {
     "font_name": "Times New Roman",
     "font_size_pt": 14,
+    "title_font_size_pt": 12,
     "alignment": "justify",
     "line_spacing": 1.15,
     "first_line_indent_cm": 1.25,
@@ -15,7 +16,8 @@
     "margin_left_cm": 3.0,
     "margin_right_cm": 1.0,
     "margin_top_cm": 2.0,
-    "margin_bottom_cm": 2.0
+    "margin_bottom_cm": 2.0,
+    "page_number_font_size_pt": 12
   },
 
   "structure": {
@@ -24,12 +26,13 @@
       "rows": 1,
       "cols": 2,
       "borders": false,
+      "bold": false,
       "left_cell": "title",
       "right_cell": "addressee"
     },
     "body": {
       "blocks": ["resume", "details", "conclusions"],
-      "separator": "empty_paragraph",
+      "separator": "none",
       "visible_subheaders": false
     },
     "appendix": {
@@ -38,6 +41,7 @@
       "cols": 2,
       "borders": false,
       "left_cell_text": "Приложение:",
+      "left_col_width": "auto_fit",
       "right_cell_format": "numbered_list"
     },
     "signature": {
@@ -46,29 +50,34 @@
       "cols": 2,
       "borders": false,
       "left_cell": "position",
-      "right_cell": "initials_surname",
-      "grid_ratio": [62, 38],
-      "right_cell_spaces": 18,
-      "right_cell_jc": "center",
-      "right_cell_first_line": 567,
-      "cell_margins": 0
+      "left_cell_alignment": "left",
+      "right_cell": "full_name",
+      "right_cell_alignment": "right"
     },
     "footer": {
       "format": "two_lines",
       "content_template": "{executor_name}\n{executor_phone}",
       "font_size_pt": 12,
       "line_spacing": "single",
-      "placement": "body_invisible_table",
-      "placement_note": "executor as borderless 1x1 table at the very end of body, after signature + spacers. NOT in footer element."
+      "empty_line_after": true,
+      "only_on_signature_page": true
     }
   },
 
-  "page_numbering": {
-    "enabled": true,
-    "start_from_page": 2,
-    "position": "center",
-    "font_size_pt": 14,
-    "different_first_page": true
+  "executors": {
+    "Панков Иван Юрьевич": "1606",
+    "Татаров Евгений Иванович": "1616",
+    "Сошников Андрей Николаевич": "1616",
+    "Кулиш Анатолий Сергеевич": "1616",
+    "Меликян Нарек Айкович": "1616"
+  },
+
+  "known_abbreviations": ["СИТ", "ЦОК"],
+
+  "nbsp_rules": {
+    "prepositions": ["в", "на", "по", "за", "из", "от", "к", "с", "у", "о", "об", "до", "при", "для", "без", "над", "под", "про", "через"],
+    "patterns": ["№", "ст."],
+    "initials_before_surname": true
   },
 
   "thresholds": {
@@ -98,5 +107,33 @@
     "tolerance_pt": 0.5,
     "tolerance_cm": 0.1,
     "max_file_size_mb": 50
+  },
+
+  "doc_types": {
+    "spravka": {
+      "title_keyword": "Справка",
+      "header_left_prefix": "Справка",
+      "body_blocks": ["resume", "details", "conclusions"],
+      "block_labels": {
+        "resume": "Резюме",
+        "details": "Детальная часть",
+        "conclusions": "Выводы"
+      },
+      "conclusions_style": "normal",
+      "conclusions_markers": ["в связи с изложенным", "считаю целесообразным", "на основании изложенного", "таким образом", "в связи с вышеизложенным"]
+    },
+    "sz": {
+      "title_keyword": "Служебная записка",
+      "header_left_prefix": "Служебная записка",
+      "body_blocks": ["intro", "details", "conclusion"],
+      "block_labels": {
+        "intro": "Вводная часть",
+        "details": "Детальная часть",
+        "conclusion": "Заключение"
+      },
+      "conclusions_style": "italic",
+      "conclusion_requires_deadline": true,
+      "conclusions_markers": ["в связи с изложенным", "прошу вас", "прошу в срок", "на основании вышеизложенного прошу", "прошу рассмотреть"]
+    }
   }
 }

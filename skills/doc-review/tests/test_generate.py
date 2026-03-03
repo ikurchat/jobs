@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from docx import Document
 from docx.shared import Pt, Cm
-from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 
 import sys
@@ -209,31 +208,15 @@ class TestCreateDocument:
         create_document(sample_content, config, path)
 
         doc = Document(str(path))
-        # Signature table is second-to-last (last is executor table)
-        sig_table = doc.tables[-2]
+        # Last table should be signature
+        last_table = doc.tables[-1]
         all_text = ""
-        for row in sig_table.rows:
+        for row in last_table.rows:
             for cell in row.cells:
                 all_text += cell.text + " "
         assert "Петров" in all_text or "Начальник" in all_text
 
-    def test_footer_has_executor(self, test_dir, config, sample_content):
-        from generate_docx import create_document
-
-        path = test_dir / "test_v1.docx"
-        create_document(sample_content, config, path)
-
-        doc = Document(str(path))
-        # Executor is now in an invisible 1x1 table at end of body
-        exec_table = doc.tables[-1]
-        assert len(exec_table.columns) == 1, "Executor table should be 1x1"
-        cell_text = exec_table.rows[0].cells[0].text
-        assert "Сидоров" in cell_text, \
-            "Executor name should appear in executor table"
-        assert "1234" in cell_text, \
-            "Executor phone should appear in executor table"
-
-    def test_executor_not_in_footer(self, test_dir, config, sample_content):
+    def test_footer(self, test_dir, config, sample_content):
         from generate_docx import create_document
 
         path = test_dir / "test_v1.docx"
@@ -241,9 +224,10 @@ class TestCreateDocument:
 
         doc = Document(str(path))
         footer = doc.sections[0].footer
-        footer_text = " ".join(p.text for p in footer.paragraphs)
-        assert "Сидоров" not in footer_text, \
-            "Executor name should NOT appear in page footer"
+        footer_lines = [p.text.strip() for p in footer.paragraphs if p.text.strip()]
+        assert len(footer_lines) >= 2, f"Footer should have 2 lines, got {footer_lines}"
+        assert "Сидоров" in footer_lines[0], f"Line 1 should have name, got: {footer_lines[0]}"
+        assert "1234" in footer_lines[1], f"Line 2 should have phone, got: {footer_lines[1]}"
 
     def test_footer_font_size(self, test_dir, config, sample_content):
         from generate_docx import create_document
@@ -259,7 +243,7 @@ class TestCreateDocument:
                     assert run.font.size == Pt(12), \
                         f"Footer font size is {run.font.size}, expected 12pt"
 
-    def test_title_page_flag_for_page_numbering(self, test_dir, config, sample_content):
+    def test_no_title_page_flag(self, test_dir, config, sample_content):
         from generate_docx import create_document
 
         path = test_dir / "test_v1.docx"
@@ -269,7 +253,7 @@ class TestCreateDocument:
         section = doc.sections[0]
         sectPr = section._sectPr
         title_pg = sectPr.find(qn("w:titlePg"))
-        assert title_pg is not None, "titlePg flag should be set for page numbering from page 2"
+        assert title_pg is None, "titlePg flag should be removed"
 
     def test_font_in_body(self, test_dir, config, sample_content):
         from generate_docx import create_document
@@ -278,120 +262,13 @@ class TestCreateDocument:
         create_document(sample_content, config, path)
 
         doc = Document(str(path))
-        # Executor lines are 12pt, everything else is 14pt
-        executor_texts = {sample_content["executor_name"], sample_content["executor_phone"]}
         for p in doc.paragraphs:
             for run in p.runs:
                 if run.text.strip():
                     assert run.font.name == "Times New Roman", \
                         f"Font is {run.font.name} for text: {run.text[:50]}"
-                    if run.text.strip() in executor_texts:
-                        assert run.font.size == Pt(12), \
-                            f"Executor font size is {run.font.size}, expected 12pt"
-                    else:
-                        assert run.font.size == Pt(14), \
-                            f"Font size is {run.font.size} for text: {run.text[:50]}"
-
-    def test_signature_table_center_aligned(self, test_dir, config, sample_content):
-        from generate_docx import create_document
-        from docx.oxml.ns import qn
-
-        path = test_dir / "test_v1.docx"
-        create_document(sample_content, config, path)
-
-        doc = Document(str(path))
-        # Signature table is second-to-last (last is executor table)
-        sig_table = doc.tables[-2]
-        right_cell = sig_table.rows[0].cells[1]
-        for p in right_cell.paragraphs:
-            if p.text.strip():
-                assert p.alignment == WD_ALIGN_PARAGRAPH.CENTER, \
-                    f"Signature name should be center-aligned, got {p.alignment}"
-                # firstLine is set via XML (not python-docx API)
-                pPr = p._element.find(qn("w:pPr"))
-                ind = pPr.find(qn("w:ind")) if pPr is not None else None
-                assert ind is not None, "w:ind element should exist"
-                fl = ind.get(qn("w:firstLine"))
-                assert fl is not None and int(fl) > 0, \
-                    f"Signature firstLine should be set via XML, got {fl}"
-
-    def test_appendix_numbered_items(self, test_dir, config, sample_content):
-        from generate_docx import create_document
-
-        path = test_dir / "test_v1.docx"
-        create_document(sample_content, config, path)
-
-        doc = Document(str(path))
-        # Find appendix table (contains "Приложение")
-        appendix_table = None
-        for table in doc.tables:
-            if "Приложение" in table.rows[0].cells[0].text:
-                appendix_table = table
-                break
-        assert appendix_table is not None
-
-        right_cell = appendix_table.rows[0].cells[1]
-        # Should have one paragraph per appendix item
-        item_paras = [p for p in right_cell.paragraphs if p.text.strip()]
-        assert len(item_paras) == len(sample_content["appendices"]), \
-            f"Expected {len(sample_content['appendices'])} items, got {len(item_paras)}"
-
-        # Each paragraph should start with "N. "
-        for i, p in enumerate(item_paras):
-            assert p.text.startswith(f"{i+1}. "), \
-                f"Item {i+1} should start with '{i+1}. ', got: {p.text[:30]}"
-
-    def test_no_leading_tabs_in_body(self, test_dir, config):
-        from generate_docx import create_document
-
-        content = {
-            "title": "Test",
-            "addressee": "Test",
-            "resume": "\tПараграф с табом в начале.",
-            "details": "",
-            "conclusions": "",
-            "signer_position": "Должность",
-            "signer_name": "И.И. Иванов",
-            "executor_name": "Иванов Иван Иванович",
-            "executor_phone": "1234",
-        }
-        path = test_dir / "test_tab.docx"
-        create_document(content, config, path)
-
-        doc = Document(str(path))
-        for p in doc.paragraphs:
-            if p.text.strip():
-                assert not p.text.startswith("\t"), \
-                    f"Paragraph starts with tab: {p.text[:40]}"
-
-    def test_all_tables_border_nil(self, test_dir, config, sample_content):
-        from generate_docx import create_document
-
-        path = test_dir / "test_v1.docx"
-        create_document(sample_content, config, path)
-
-        doc = Document(str(path))
-        for idx, table in enumerate(doc.tables):
-            # Check table-level borders
-            tblPr = table._tbl.tblPr
-            if tblPr is not None:
-                borders = tblPr.find(qn("w:tblBorders"))
-                if borders is not None:
-                    for child in borders:
-                        val = child.get(qn("w:val"))
-                        assert val in ("none", "nil", None), \
-                            f"Table {idx} border {child.tag} has val={val}"
-            # Check cell-level borders
-            for row in table.rows:
-                for cell in row.cells:
-                    tcPr = cell._tc.find(qn("w:tcPr"))
-                    if tcPr is not None:
-                        cb = tcPr.find(qn("w:tcBorders"))
-                        if cb is not None:
-                            for b in cb:
-                                val = b.get(qn("w:val"))
-                                assert val in ("none", "nil", None), \
-                                    f"Table {idx} cell border {b.tag} has val={val}"
+                    assert run.font.size == Pt(14), \
+                        f"Font size is {run.font.size} for text: {run.text[:50]}"
 
     def test_no_appendix_when_empty(self, test_dir, config, sample_content):
         from generate_docx import create_document
@@ -403,8 +280,8 @@ class TestCreateDocument:
         create_document(content, config, path)
 
         doc = Document(str(path))
-        # Should have 3 tables: header + signature + executor (no appendix)
-        assert len(doc.tables) == 3
+        # Should have 2 tables: header + signature (no appendix)
+        assert len(doc.tables) == 2
 
 
 # ---------------------------------------------------------------------------

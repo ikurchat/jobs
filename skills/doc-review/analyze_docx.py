@@ -10,6 +10,7 @@ Outputs structured JSON to stdout.
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,13 @@ SEVERITY_MAP = {
     "SIGNATURE_TABLE_BORDERS": SEVERITY_DESIRABLE,
     "FOOTER_MISSING": SEVERITY_CRITICAL,
     "FOOTER_CONTENT": SEVERITY_DESIRABLE,
+    "SZ_CONCLUSION_NOT_ITALIC": SEVERITY_DESIRABLE,
+    "SZ_CONCLUSION_MISSING_MARKER": SEVERITY_DESIRABLE,
+    "SZ_CONCLUSION_NO_DEADLINE": SEVERITY_DESIRABLE,
+    "HEADER_TITLE_FONT_SIZE": SEVERITY_DESIRABLE,
+    "HEADER_BOLD": SEVERITY_DESIRABLE,
+    "SIGNATURE_RIGHT_ALIGNMENT": SEVERITY_DESIRABLE,
+    "NBSP_MISSING": SEVERITY_RECOMMENDATION,
 }
 
 
@@ -454,6 +462,171 @@ def _identify_body_paragraphs(doc: Document, elements: dict, header_table, appen
 
 
 # ---------------------------------------------------------------------------
+# Document type detection
+# ---------------------------------------------------------------------------
+
+def _detect_doc_type(
+    header_table,
+    body_paragraphs: list,
+    config: dict,
+) -> dict:
+    """Detect document type (spravka vs sz) using scoring.
+
+    Returns:
+        {"type": "spravka"|"sz"|"unknown", "confidence": 0.0-1.0, "signals": [...]}
+    """
+    doc_types = config.get("doc_types", {})
+    if not doc_types:
+        return {"type": "unknown", "confidence": 0.0, "signals": ["no doc_types in config"]}
+
+    scores: dict[str, int] = {dt: 0 for dt in doc_types}
+    signals: list[str] = []
+
+    # 1. Check header title (left cell) for keywords — +10
+    header_title = ""
+    if header_table is not None:
+        header_title = _get_cell_text(header_table, 0, 0).lower()
+
+    for dt_key, dt_cfg in doc_types.items():
+        keyword = dt_cfg.get("title_keyword", "").lower()
+        if keyword and keyword in header_title:
+            scores[dt_key] += 10
+            signals.append(f"header contains '{dt_cfg['title_keyword']}' → {dt_key} +10")
+
+    # 2. Check body for conclusions markers — +3
+    body_lower = "\n".join(
+        p.text.strip().lower() for _, p in body_paragraphs if p.text.strip()
+    )
+
+    for dt_key, dt_cfg in doc_types.items():
+        for marker in dt_cfg.get("conclusions_markers", []):
+            if marker.lower() in body_lower:
+                scores[dt_key] += 3
+                signals.append(f"body contains '{marker}' → {dt_key} +3")
+                break  # one marker per type is enough
+
+    # 3. Check body for intro patterns — +2 for sz
+    sz_intro_markers = ["довожу до вашего сведения", "в соответствии с поручением"]
+    for marker in sz_intro_markers:
+        if marker in body_lower:
+            scores.setdefault("sz", 0)
+            scores["sz"] = scores.get("sz", 0) + 2
+            signals.append(f"body contains '{marker}' → sz +2")
+            break
+
+    # Determine winner
+    max_score = max(scores.values()) if scores else 0
+    if max_score == 0:
+        return {"type": "unknown", "confidence": 0.0, "signals": signals}
+
+    winners = [dt for dt, s in scores.items() if s == max_score]
+    winner = winners[0]
+
+    # Confidence: normalize against reasonable max (10 header + 3 markers + 2 intro = 15)
+    confidence = min(max_score / 13.0, 1.0)
+
+    return {"type": winner, "confidence": round(confidence, 2), "signals": signals}
+
+
+def _split_body_into_blocks(
+    body_paragraphs: list,
+    doc_type_info: dict,
+    config: dict,
+) -> list[dict]:
+    """Split body paragraphs into labeled blocks based on doc type.
+
+    Returns list of {"block": str, "label": str, "paragraphs": [str, ...]}.
+    """
+    doc_type = doc_type_info.get("type", "unknown")
+    doc_types = config.get("doc_types", {})
+    dt_cfg = doc_types.get(doc_type, {})
+
+    block_names = dt_cfg.get("body_blocks", ["resume", "details", "conclusions"])
+    block_labels = dt_cfg.get("block_labels", {})
+    conclusion_markers = [m.lower() for m in dt_cfg.get("conclusions_markers", [])]
+
+    # Collect non-empty paragraph texts with their indices
+    texts: list[str] = []
+    for _, p in body_paragraphs:
+        texts.append(p.text.strip())
+
+    if not texts:
+        return []
+
+    # Find conclusion start: first paragraph containing a conclusion marker
+    conclusion_start = len(texts)
+    for i, t in enumerate(texts):
+        t_lower = t.lower()
+        for marker in conclusion_markers:
+            if marker in t_lower:
+                conclusion_start = i
+                break
+        if conclusion_start < len(texts):
+            break
+
+    # Split into three blocks:
+    # - First 1-2 non-empty paragraphs before details → intro/resume
+    # - Everything between → details
+    # - From conclusion marker to end → conclusions/conclusion
+
+    # Find non-empty paragraph indices
+    non_empty = [i for i, t in enumerate(texts) if t]
+
+    if not non_empty:
+        return []
+
+    # Heuristic for intro/resume boundary:
+    # If conclusion_start <= 2, put everything before it as intro, nothing as details
+    # Otherwise, first 1-2 non-empty paragraphs = intro, rest until conclusion = details
+    if len(non_empty) <= 1:
+        # Single paragraph — put it all as first block
+        first_block = block_names[0] if block_names else "resume"
+        return [{
+            "block": first_block,
+            "label": block_labels.get(first_block, first_block),
+            "paragraphs": [t for t in texts if t],
+        }]
+
+    # Determine intro end: first 1-2 substantial paragraphs
+    intro_end = min(2, conclusion_start) if conclusion_start > 2 else conclusion_start
+
+    # Build blocks
+    result = []
+
+    # Block 1: intro/resume
+    first_block_name = block_names[0] if block_names else "resume"
+    intro_paras = [t for t in texts[:intro_end] if t]
+    if intro_paras:
+        result.append({
+            "block": first_block_name,
+            "label": block_labels.get(first_block_name, first_block_name),
+            "paragraphs": intro_paras,
+        })
+
+    # Block 2: details
+    mid_block_name = block_names[1] if len(block_names) > 1 else "details"
+    details_paras = [t for t in texts[intro_end:conclusion_start] if t]
+    if details_paras:
+        result.append({
+            "block": mid_block_name,
+            "label": block_labels.get(mid_block_name, mid_block_name),
+            "paragraphs": details_paras,
+        })
+
+    # Block 3: conclusions/conclusion
+    last_block_name = block_names[2] if len(block_names) > 2 else "conclusions"
+    concl_paras = [t for t in texts[conclusion_start:] if t]
+    if concl_paras:
+        result.append({
+            "block": last_block_name,
+            "label": block_labels.get(last_block_name, last_block_name),
+            "paragraphs": concl_paras,
+        })
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Checkers
 # ---------------------------------------------------------------------------
 
@@ -692,6 +865,45 @@ def _check_structure(doc: Document, config: dict) -> tuple[list[dict], dict, lis
                     "actual": "borders present",
                 })
 
+        # Check bold=False in header table (both cells)
+        if not header_cfg.get("bold", False):
+            for ci, cell in enumerate(header_table.rows[0].cells):
+                for p in cell.paragraphs:
+                    for run in p.runs:
+                        if run.text.strip() and run.bold:
+                            cell_label = "заголовок" if ci == 0 else "адресат"
+                            issues.append({
+                                "level": "format",
+                                "severity": SEVERITY_MAP["HEADER_BOLD"],
+                                "code": "HEADER_BOLD",
+                                "message": f"Шапка ({cell_label}): жирный шрифт запрещён",
+                                "location": "header_table",
+                                "expected": "bold=False",
+                                "actual": "bold=True",
+                            })
+                            break
+
+        # Check title font size (left cell = 12pt)
+        expected_title_size = config.get("formatting", {}).get("title_font_size_pt", 12)
+        tolerance_pt = config.get("analysis", {}).get("tolerance_pt", 0.5)
+        left_cell = header_table.rows[0].cells[0]
+        for p in left_cell.paragraphs:
+            for run in p.runs:
+                if not run.text.strip():
+                    continue
+                font_size = _resolve_font_size_pt(run)
+                if font_size is not None and not _approx_eq_pt(font_size, expected_title_size, tolerance_pt):
+                    issues.append({
+                        "level": "format",
+                        "severity": SEVERITY_MAP["HEADER_TITLE_FONT_SIZE"],
+                        "code": "HEADER_TITLE_FONT_SIZE",
+                        "message": f"Название документа: {font_size}pt вместо {expected_title_size}pt",
+                        "location": "header_table",
+                        "expected": f"{expected_title_size}pt",
+                        "actual": f"{font_size}pt",
+                    })
+                    break
+
     # --- Appendix table ---
     appendix_table = _identify_appendix_table(tables, config)
     has_appendix_table = appendix_table is not None
@@ -854,6 +1066,100 @@ def _check_structure(doc: Document, config: dict) -> tuple[list[dict], dict, lis
                     "actual": paragraph.text[:60],
                 })
 
+    # --- Signature table alignment check ---
+    if has_signature_table:
+        sig_cfg = struct_cfg.get("signature", {})
+        expected_right_align = sig_cfg.get("right_cell_alignment", "right")
+        if expected_right_align == "right" and len(signature_table.rows[0].cells) >= 2:
+            right_cell = signature_table.rows[0].cells[1]
+            for p in right_cell.paragraphs:
+                actual_align = _resolve_alignment(p)
+                if actual_align is not None and actual_align != WD_ALIGN_PARAGRAPH.RIGHT:
+                    issues.append({
+                        "level": "format",
+                        "severity": SEVERITY_MAP["SIGNATURE_RIGHT_ALIGNMENT"],
+                        "code": "SIGNATURE_RIGHT_ALIGNMENT",
+                        "message": "Таблица подписи: правая ячейка должна быть выровнена вправо",
+                        "location": "signature_table",
+                        "expected": "right",
+                        "actual": str(actual_align),
+                    })
+                    break
+
+    # --- Non-breaking space check ---
+    nbsp_cfg = config.get("nbsp_rules", {})
+    prepositions = nbsp_cfg.get("prepositions", [])
+    if prepositions:
+        prep_pattern = re.compile(
+            r'\b(' + '|'.join(re.escape(p) for p in prepositions) + r')\s',
+            re.IGNORECASE,
+        )
+        nbsp_warned = False
+        for para_num, paragraph in body_paragraphs:
+            text = paragraph.text.strip()
+            if text and prep_pattern.search(text):
+                if not nbsp_warned:
+                    issues.append({
+                        "level": "format",
+                        "severity": SEVERITY_MAP["NBSP_MISSING"],
+                        "code": "NBSP_MISSING",
+                        "message": "Обнаружены предлоги/номера без неразрывных пробелов",
+                        "location": "body",
+                        "expected": "non-breaking spaces after prepositions, №, ст.",
+                        "actual": "regular spaces",
+                    })
+                    nbsp_warned = True
+
+    # --- Type-aware checks ---
+    doc_type_info = _detect_doc_type(header_table, body_paragraphs, config)
+    doc_types_cfg = config.get("doc_types", {})
+    dt_cfg = doc_types_cfg.get(doc_type_info["type"], {})
+
+    if doc_type_info["type"] == "sz":
+        conclusion_markers = [m.lower() for m in dt_cfg.get("conclusions_markers", [])]
+
+        if dt_cfg.get("conclusions_style") == "italic":
+            # Check that conclusion paragraphs use italic
+            in_conclusion = False
+            for para_num, paragraph in body_paragraphs:
+                text = paragraph.text.strip()
+                if not text:
+                    continue
+                text_lower = text.lower()
+                if not in_conclusion:
+                    for marker in conclusion_markers:
+                        if marker in text_lower:
+                            in_conclusion = True
+                            break
+                if in_conclusion:
+                    runs_with_text = [r for r in paragraph.runs if r.text.strip()]
+                    if runs_with_text and not all(r.italic for r in runs_with_text):
+                        issues.append({
+                            "level": "format",
+                            "severity": SEVERITY_MAP["SZ_CONCLUSION_NOT_ITALIC"],
+                            "code": "SZ_CONCLUSION_NOT_ITALIC",
+                            "message": f"Абзац {para_num}: заключение СЗ должно быть курсивом",
+                            "location": f"paragraph:{para_num}",
+                            "expected": "italic text in conclusion",
+                            "actual": "normal text",
+                        })
+
+        # Check SZ conclusion has a deadline (срок)
+        if dt_cfg.get("conclusion_requires_deadline"):
+            body_lower = "\n".join(p.text.strip().lower() for _, p in body_paragraphs if p.text.strip())
+            deadline_patterns = [r"в\s+срок\s+до", r"до\s+\d{1,2}[.\s]", r"не\s+позднее"]
+            has_deadline = any(re.search(pat, body_lower) for pat in deadline_patterns)
+            if not has_deadline:
+                issues.append({
+                    "level": "content",
+                    "severity": SEVERITY_MAP["SZ_CONCLUSION_NO_DEADLINE"],
+                    "code": "SZ_CONCLUSION_NO_DEADLINE",
+                    "message": "В заключении СЗ отсутствует срок исполнения",
+                    "location": "body",
+                    "expected": "deadline in conclusion (в срок до...)",
+                    "actual": "no deadline found",
+                })
+
     structure_info = {
         "has_header_table": has_header_table,
         "has_appendix_table": has_appendix_table,
@@ -893,8 +1199,11 @@ def cmd_analyze(file_path: Path, prev_path: Path | None, config: dict) -> None:
         all_issues.extend(_check_page_setup(doc, config, tolerance_cm))
 
         # 2. Structural checks (also returns body paragraphs for formatting checks)
-        struct_issues, structure_info, body_paragraphs, *_ = _check_structure(doc, config)
+        struct_issues, structure_info, body_paragraphs, header_table, appendix_table, signature_table = _check_structure(doc, config)
         all_issues.extend(struct_issues)
+
+        # 2.5. Detect document type
+        doc_type_info = _detect_doc_type(header_table, body_paragraphs, config)
 
         # 3. Paragraph formatting
         all_issues.extend(
@@ -944,6 +1253,7 @@ def cmd_analyze(file_path: Path, prev_path: Path | None, config: dict) -> None:
         result = {
             "file": file_path.name,
             "encrypted": encrypted,
+            "doc_type": doc_type_info,
             "issues": all_issues,
             "structure": structure_info,
             "summary": {
@@ -1007,6 +1317,12 @@ def cmd_extract(file_path: Path, config: dict) -> None:
                 body_texts.append(text)
         body_text = "\n".join(body_texts)
 
+        # --- Document type detection ---
+        doc_type_info = _detect_doc_type(header_table, body_paragraphs, config)
+
+        # --- Body blocks ---
+        body_blocks = _split_body_into_blocks(body_paragraphs, doc_type_info, config)
+
         # --- Appendix ---
         appendix_items = []
         if appendix_table is not None:
@@ -1056,7 +1372,9 @@ def cmd_extract(file_path: Path, config: dict) -> None:
 
         result = {
             "file": file_path.name,
+            "doc_type": doc_type_info,
             "header": header_data,
+            "body_blocks": body_blocks,
             "body_text": body_text,
             "appendix": appendix_items,
             "signature": signature_data,

@@ -10,6 +10,7 @@ All operations happen in /dev/shm. Output is JSON on stdout.
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -66,37 +67,57 @@ def _apply_paragraph_format(paragraph, config: dict) -> None:
     pf.space_after = Pt(fmt.get("space_after_pt", 0))
 
 
-def _set_cyrillic_fonts(run, font_name: str) -> None:
-    """Set all font faces for Cyrillic support."""
+def _apply_run_format(run, config: dict, bold: bool = False, italic: bool = False,
+                      font_size_pt: int | None = None) -> None:
+    """Apply standard font formatting to a run from config."""
+    fmt = config["formatting"]
+    size = font_size_pt or fmt["font_size_pt"]
+    run.font.name = fmt["font_name"]
+    run.font.size = Pt(size)
+    run.bold = bold
+    run.italic = italic
+
+    # Ensure Times New Roman works for Cyrillic
     rPr = run._element.get_or_add_rPr()
     rFonts = rPr.find(qn("w:rFonts"))
     if rFonts is None:
         rFonts = OxmlElement("w:rFonts")
         rPr.insert(0, rFonts)
-    rFonts.set(qn("w:ascii"), font_name)
-    rFonts.set(qn("w:hAnsi"), font_name)
-    rFonts.set(qn("w:cs"), font_name)
-    rFonts.set(qn("w:eastAsia"), font_name)
+    rFonts.set(qn("w:ascii"), fmt["font_name"])
+    rFonts.set(qn("w:hAnsi"), fmt["font_name"])
+    rFonts.set(qn("w:cs"), fmt["font_name"])
+    rFonts.set(qn("w:eastAsia"), fmt["font_name"])
 
 
-def _apply_run_format(run, config: dict, bold: bool = False) -> None:
-    """Apply standard font formatting to a run from config."""
-    fmt = config["formatting"]
-    run.font.name = fmt["font_name"]
-    run.font.size = Pt(fmt["font_size_pt"])
-    run.bold = bold
+def _apply_nbsp(text: str, config: dict) -> str:
+    """Replace regular spaces with non-breaking spaces where needed."""
+    nbsp = "\u00A0"
+    nbsp_cfg = config.get("nbsp_rules", {})
 
-    # Ensure Times New Roman works for Cyrillic
-    _set_cyrillic_fonts(run, fmt["font_name"])
+    # Prepositions: "в ", "на ", etc. at word boundary → "в\u00A0"
+    prepositions = nbsp_cfg.get("prepositions", [])
+    if prepositions:
+        pattern = r'\b(' + '|'.join(re.escape(p) for p in prepositions) + r')\s+'
+        text = re.sub(pattern, lambda m: m.group(1) + nbsp, text, flags=re.IGNORECASE)
+
+    # Patterns like №, ст. followed by space+digit
+    for pat in nbsp_cfg.get("patterns", []):
+        text = text.replace(f"{pat} ", f"{pat}{nbsp}")
+
+    # Initials before surname: "И.О. " → "И.О.\u00A0"
+    if nbsp_cfg.get("initials_before_surname"):
+        text = re.sub(r'([А-ЯЁ]\.[А-ЯЁ]\.)\s+', r'\1' + nbsp, text)
+
+    return text
 
 
-def _add_formatted_paragraph(doc, text: str, config: dict, bold: bool = False) -> None:
+def _add_formatted_paragraph(doc, text: str, config: dict, bold: bool = False,
+                             italic: bool = False, font_size_pt: int | None = None) -> None:
     """Add a paragraph with standard formatting."""
     p = doc.add_paragraph()
     _apply_paragraph_format(p, config)
-    # Strip leading tabs — firstLine indent handles the red line
-    run = p.add_run(text.lstrip("\t"))
-    _apply_run_format(run, config, bold=bold)
+    run = p.add_run(_apply_nbsp(text, config) if text else text)
+    _apply_run_format(run, config, bold=bold, italic=italic, font_size_pt=font_size_pt)
 
 
 # ---------------------------------------------------------------------------
@@ -144,38 +165,16 @@ def _remove_table_borders(table) -> None:
             tcPr.append(cell_borders)
 
 
-def _set_cell_margins(cell, top=0, bottom=0, left=0, right=0) -> None:
-    """Set explicit cell margins (padding) in twips. 0 = no padding."""
-    tcPr = cell._tc.get_or_add_tcPr()
-    existing = tcPr.find(qn("w:tcMar"))
-    if existing is not None:
-        tcPr.remove(existing)
-    tcMar = OxmlElement("w:tcMar")
-    for side, val in [("top", top), ("bottom", bottom),
-                      ("start", left), ("end", right)]:
-        el = OxmlElement(f"w:{side}")
-        el.set(qn("w:w"), str(val))
-        el.set(qn("w:type"), "dxa")
-        tcMar.append(el)
-    tcPr.append(tcMar)
-
-
-def _set_cell_text(cell, text: str, config: dict, bold: bool = False) -> None:
+def _set_cell_text(cell, text: str, config: dict, bold: bool = False,
+                   italic: bool = False, font_size_pt: int | None = None) -> None:
     """Set text in a table cell with standard formatting."""
-    # Remove extra paragraphs via XML, keep only the first one
-    tc = cell._tc
-    p_elements = tc.findall(qn("w:p"))
-    for p_elem in p_elements[1:]:
-        tc.remove(p_elem)
-
-    p = cell.paragraphs[0]
-    p.clear()
+    # Clear existing paragraphs
+    for p in cell.paragraphs:
+        p.clear()
+    p = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
     _apply_paragraph_format(p, config)
-    # Remove indents inside table cells — they clip text and add junk offsets
-    p.paragraph_format.first_line_indent = None
-    p.paragraph_format.left_indent = None
-    run = p.add_run(text)
-    _apply_run_format(run, config, bold=bold)
+    run = p.add_run(_apply_nbsp(text, config) if text else text)
+    _apply_run_format(run, config, bold=bold, italic=italic, font_size_pt=font_size_pt)
 
 
 def _set_table_grid(table, col_widths_twips: list[int]) -> None:
@@ -238,35 +237,6 @@ def _set_table_grid(table, col_widths_twips: list[int]) -> None:
                 tcW.set(qn("w:type"), "dxa")
 
 
-def _set_cell_numbered_list(cell, items: list[str], config: dict) -> None:
-    """Fill a table cell with a clean numbered list — no extra indents.
-
-    Each item becomes a separate paragraph: "1. text", "2. text", etc.
-    No hanging indent — items sit flush at the left edge of the cell.
-    """
-    # Remove all paragraphs except the first via XML
-    tc = cell._tc
-    p_elements = tc.findall(qn("w:p"))
-    for p_elem in p_elements[1:]:
-        tc.remove(p_elem)
-    if cell.paragraphs:
-        cell.paragraphs[0].clear()
-
-    for i, item in enumerate(items):
-        if i == 0:
-            p = cell.paragraphs[0]
-        else:
-            p = cell.add_paragraph()
-
-        _apply_paragraph_format(p, config)
-        # No indent in table cells — clean flush-left alignment
-        p.paragraph_format.first_line_indent = None
-        p.paragraph_format.left_indent = None
-
-        run = p.add_run(f"{i + 1}. {item}")
-        _apply_run_format(run, config)
-
-
 def _page_width_twips(config: dict) -> int:
     """Return usable page width (between margins) in twips."""
     page = config["page"]
@@ -276,15 +246,26 @@ def _page_width_twips(config: dict) -> int:
 
 def _create_1x2_table(doc, left_text: str, right_text: str, config: dict,
                        left_bold: bool = False, right_bold: bool = False,
-                       right_align_right: bool = False,
-                       left_pct: float = 0.5):
+                       left_align: str = "left", right_align: str = "left",
+                       left_pct: float = 0.5,
+                       left_font_size_pt: int | None = None,
+                       left_col_twips: int | None = None):
     """Create a 1x2 table without borders spanning full page width.
 
     Args:
-        right_align_right: If True, right cell text is right-aligned.
-        left_pct: Left column share (0..1). Default 0.5 (50/50).
+        left_align/right_align: "left", "right", "center", "justify".
+        left_pct: Left column share (0..1). Ignored if left_col_twips set.
+        left_font_size_pt: Override font size for left cell.
+        left_col_twips: Exact left column width in twips (for auto-fit).
     Returns the created table.
     """
+    align_map = {
+        "left": WD_ALIGN_PARAGRAPH.LEFT,
+        "right": WD_ALIGN_PARAGRAPH.RIGHT,
+        "center": WD_ALIGN_PARAGRAPH.CENTER,
+        "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
+    }
+
     table = doc.add_table(rows=1, cols=2)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
@@ -292,17 +273,22 @@ def _create_1x2_table(doc, left_text: str, right_text: str, config: dict,
 
     # Set proper grid with explicit column widths
     total_twips = _page_width_twips(config)
-    left_twips = int(total_twips * left_pct)
+    if left_col_twips is not None:
+        left_twips = left_col_twips
+    else:
+        left_twips = int(total_twips * left_pct)
     right_twips = total_twips - left_twips
     _set_table_grid(table, [left_twips, right_twips])
 
-    _set_cell_text(table.rows[0].cells[0], left_text, config, bold=left_bold)
+    _set_cell_text(table.rows[0].cells[0], left_text, config,
+                   bold=left_bold, font_size_pt=left_font_size_pt)
     _set_cell_text(table.rows[0].cells[1], right_text, config, bold=right_bold)
 
-    # Right-align right cell if requested
-    if right_align_right:
-        for p in table.rows[0].cells[1].paragraphs:
-            p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    # Apply alignments
+    for p in table.rows[0].cells[0].paragraphs:
+        p.alignment = align_map.get(left_align, WD_ALIGN_PARAGRAPH.LEFT)
+    for p in table.rows[0].cells[1].paragraphs:
+        p.alignment = align_map.get(right_align, WD_ALIGN_PARAGRAPH.LEFT)
 
     return table
 
@@ -340,7 +326,15 @@ def _make_footer_run(paragraph, text: str, config: dict) -> None:
     run.font.color.rgb = RGBColor(0, 0, 0)
 
     # Set Cyrillic font faces
-    _set_cyrillic_fonts(run, font_name)
+    rPr = run._element.get_or_add_rPr()
+    rFonts = rPr.find(qn("w:rFonts"))
+    if rFonts is None:
+        rFonts = OxmlElement("w:rFonts")
+        rPr.insert(0, rFonts)
+    rFonts.set(qn("w:ascii"), font_name)
+    rFonts.set(qn("w:hAnsi"), font_name)
+    rFonts.set(qn("w:cs"), font_name)
+    rFonts.set(qn("w:eastAsia"), font_name)
 
 
 def _apply_footer_paragraph_format(paragraph) -> None:
@@ -376,280 +370,9 @@ def _remove_title_page_flag(section) -> None:
         sectPr.remove(title_pg)
 
 
-def _calc_executor_spacers(doc, config: dict) -> int:
-    """Calculate number of spacer paragraphs needed to push executor table to page bottom.
-
-    Estimates total content height in points, determines which page the signature
-    lands on, and calculates remaining space on that page minus executor height.
-    Returns number of 12pt single-spaced empty paragraphs needed.
-    """
-    body = doc.element.body
-    usable_h_pt = _page_usable_height_pt(config)
-    content_h_pt = 0.0
-
-    for child in body:
-        tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-        if tag == 'sectPr':
-            continue
-        if tag == 'tbl':
-            # Estimate table height: count paragraphs across all cells
-            paras = child.findall(f'.//{qn("w:p")}')
-            content_h_pt += len(paras) * 14 * 1.5  # rough: 14pt * 1.5 spacing per para
-        elif tag == 'p':
-            text = ''.join(n.text or '' for n in child.iter(qn('w:t')))
-            sz_el = child.find(f'.//{qn("w:sz")}')
-            font_pt = int(sz_el.get(qn('w:val'), '28')) / 2 if sz_el is not None else 14
-            pPr = child.find(qn('w:pPr'))
-            spacing = pPr.find(qn('w:spacing')) if pPr is not None else None
-            if spacing is not None:
-                line_val = int(spacing.get(qn('w:line'), '360'))
-            else:
-                line_val = 360
-            line_mult = line_val / 240
-
-            if not text.strip():
-                content_h_pt += font_pt * line_mult
-            else:
-                chars_per_line = 80
-                lines = max(1, len(text) / chars_per_line)
-                content_h_pt += lines * font_pt * line_mult
-
-    # Which page does this land on?
-    page_num = int(content_h_pt // usable_h_pt) + 1
-    used_on_last_page = content_h_pt - (page_num - 1) * usable_h_pt
-
-    # Executor table = 2 lines * 12pt = 24pt
-    executor_h_pt = 24
-    remaining = usable_h_pt - used_on_last_page - executor_h_pt
-
-    if remaining <= 0:
-        return 0
-
-    spacer_h = 12  # 12pt single-spaced empty paragraph
-    return max(0, int(remaining / spacer_h) - 1)  # -1 for safety margin
-
-
-def _page_usable_height_pt(config: dict) -> float:
-    """Return usable page height (between margins) in points."""
-    page = config["page"]
-    h_cm = page["height_cm"] - page["margin_top_cm"] - page["margin_bottom_cm"]
-    return h_cm / 2.54 * 72
-
-
-def _create_executor_table(doc, executor_name: str, executor_phone: str, config: dict) -> None:
-    """Add executor info as invisible (borderless) 1x1 table at the very end of body.
-
-    Automatically calculates spacer paragraphs to push the table to the bottom
-    of the page where the signature is located.
-
-    executor_name MUST be full name (Фамилия Имя Отчество).
-    """
-    footer_cfg = config["structure"]["footer"]
-    font_name = config["formatting"]["font_name"]
-    font_size = footer_cfg.get("font_size_pt", 12)
-
-    # Calculate and add spacers
-    spacer_count = _calc_executor_spacers(doc, config)
-    for _ in range(spacer_count):
-        p = doc.add_paragraph()
-        pf = p.paragraph_format
-        pf.space_before = Pt(0)
-        pf.space_after = Pt(0)
-        pf.line_spacing_rule = WD_LINE_SPACING.SINGLE
-        pf.first_line_indent = None
-        # 12pt invisible run to set line height
-        run = p.add_run()
-        run.font.size = Pt(12)
-
-    # Create 1x1 invisible table
-    table = doc.add_table(rows=1, cols=1)
-    table.alignment = WD_TABLE_ALIGNMENT.LEFT
-    _remove_table_borders(table)
-
-    cell = table.rows[0].cells[0]
-    _set_cell_margins(cell, top=0, bottom=0, left=0, right=0)
-
-    # Remove default paragraph, build from scratch
-    tc = cell._tc
-    for p_elem in tc.findall(qn("w:p")):
-        tc.remove(p_elem)
-
-    def _make_executor_para(text):
-        p = OxmlElement("w:p")
-        pPr = OxmlElement("w:pPr")
-        jc = OxmlElement("w:jc")
-        jc.set(qn("w:val"), "left")
-        pPr.append(jc)
-        ind = OxmlElement("w:ind")
-        ind.set(qn("w:firstLine"), "0")
-        ind.set(qn("w:left"), "0")
-        pPr.append(ind)
-        spacing = OxmlElement("w:spacing")
-        spacing.set(qn("w:before"), "0")
-        spacing.set(qn("w:after"), "0")
-        spacing.set(qn("w:line"), "240")
-        spacing.set(qn("w:lineRule"), "auto")
-        pPr.append(spacing)
-        p.append(pPr)
-
-        r = OxmlElement("w:r")
-        rPr = OxmlElement("w:rPr")
-        rFonts = OxmlElement("w:rFonts")
-        rFonts.set(qn("w:ascii"), font_name)
-        rFonts.set(qn("w:hAnsi"), font_name)
-        rFonts.set(qn("w:cs"), font_name)
-        rFonts.set(qn("w:eastAsia"), font_name)
-        rPr.append(rFonts)
-        sz = OxmlElement("w:sz")
-        sz.set(qn("w:val"), str(font_size * 2))
-        rPr.append(sz)
-        szCs = OxmlElement("w:szCs")
-        szCs.set(qn("w:val"), str(font_size * 2))
-        rPr.append(szCs)
-        r.append(rPr)
-        t = OxmlElement("w:t")
-        t.set(qn("xml:space"), "preserve")
-        t.text = text
-        r.append(t)
-        p.append(r)
-        return p
-
-    tc.append(_make_executor_para(executor_name))
-    tc.append(_make_executor_para(executor_phone))
-
-
-def _setup_page_numbering(doc, config: dict) -> None:
-    """Page numbering from page 2: centered, 14pt TNR. Page 1 = nothing."""
-    section = doc.sections[0]
-    sectPr = section._sectPr
-
-    # Enable differentFirst
-    title_pg = sectPr.find(qn("w:titlePg"))
-    if title_pg is None:
-        title_pg = OxmlElement("w:titlePg")
-        sectPr.append(title_pg)
-
-    font_name = config["formatting"]["font_name"]
-    pg_cfg = config.get("page_numbering", {})
-    font_size = pg_cfg.get("font_size_pt", 14)
-
-    # First page header — empty
-    first_header = section.first_page_header
-    first_header.is_linked_to_previous = False
-    _clear_header_xml(first_header)
-
-    # First page footer — empty
-    first_footer = section.first_page_footer
-    first_footer.is_linked_to_previous = False
-    _clear_footer_xml(first_footer)
-
-    # Default header (pages 2+): empty line + PAGE field centered
-    header = section.header
-    header.is_linked_to_previous = False
-    _clear_header_xml(header)
-
-    # Empty line above number
-    p_spacer = header.add_paragraph()
-    p_spacer.paragraph_format.space_before = Pt(0)
-    p_spacer.paragraph_format.space_after = Pt(0)
-    p_spacer.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
-
-    # PAGE field
-    p = header.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.paragraph_format.space_before = Pt(0)
-    p.paragraph_format.space_after = Pt(0)
-
-    # fldChar begin
-    fld_begin = OxmlElement("w:fldChar")
-    fld_begin.set(qn("w:fldCharType"), "begin")
-    run_begin = p.add_run()
-    run_begin.font.name = font_name
-    run_begin.font.size = Pt(font_size)
-    _set_cyrillic_fonts(run_begin, font_name)
-    run_begin._element.append(fld_begin)
-
-    # instrText " PAGE "
-    run_instr = p.add_run()
-    run_instr.font.name = font_name
-    run_instr.font.size = Pt(font_size)
-    instr = OxmlElement("w:instrText")
-    instr.set(qn("xml:space"), "preserve")
-    instr.text = " PAGE "
-    run_instr._element.append(instr)
-
-    # fldChar end
-    fld_end = OxmlElement("w:fldChar")
-    fld_end.set(qn("w:fldCharType"), "end")
-    run_end = p.add_run()
-    run_end.font.name = font_name
-    run_end.font.size = Pt(font_size)
-    run_end._element.append(fld_end)
-
-    # Default footer — empty
-    footer = section.footer
-    footer.is_linked_to_previous = False
-    _clear_footer_xml(footer)
-
-
-def _create_signature_table(doc, position: str, name: str, config: dict):
-    """Signature table: 62/38 grid, name with 18 spaces + center + firstLine=567."""
-    table = doc.add_table(rows=1, cols=2)
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    _remove_table_borders(table)
-
-    total_twips = _page_width_twips(config)
-    sig_cfg = config["structure"].get("signature", {})
-    ratio = sig_cfg.get("grid_ratio", [62, 38])
-    left_twips = int(total_twips * ratio[0] / 100)
-    right_twips = total_twips - left_twips
-    _set_table_grid(table, [left_twips, right_twips])
-
-    for cell in table.rows[0].cells:
-        _set_cell_margins(cell, top=0, bottom=0, left=0, right=0)
-
-    # Left: position
-    _set_cell_text(table.rows[0].cells[0], position, config)
-    for p in table.rows[0].cells[0].paragraphs:
-        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-
-    # Right: И.О. Фамилия with spaces
-    cell_right = table.rows[0].cells[1]
-    tc = cell_right._tc
-    p_elements = tc.findall(qn("w:p"))
-    for p_elem in p_elements[1:]:
-        tc.remove(p_elem)
-
-    p0 = cell_right.paragraphs[0]
-    p0.clear()
-    spaces = sig_cfg.get("right_cell_spaces", 18)
-    first_line = sig_cfg.get("right_cell_first_line", 567)
-    p0.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    pPr = p0._element.get_or_add_pPr()
-    ind = pPr.find(qn("w:ind"))
-    if ind is None:
-        ind = OxmlElement("w:ind")
-        pPr.append(ind)
-    ind.set(qn("w:firstLine"), str(first_line))
-    p0.paragraph_format.space_before = Pt(0)
-    p0.paragraph_format.space_after = Pt(0)
-
-    run = p0.add_run(" " * spaces + name)
-    _apply_run_format(run, config)
-
-    # Empty p1
-    cell_right.add_paragraph()
-
-    return table
-
-
 def _setup_footer(doc, executor_name: str, executor_phone: str, config: dict) -> None:
-    """Add footer with executor info: name on line 1, phone on line 2.
-
-    executor_name MUST be the full name (Фамилия Имя Отчество), NOT initials.
-    executor_phone is the internal phone number.
-    """
-    section = doc.sections[0]
+    """Add footer with executor info: name on line 1, phone on line 2, empty line after."""
+    section = doc.sections[-1]  # Use last section (for multi-section docs)
 
     # Remove "Different First Page" flag so footer shows on page 1
     _remove_title_page_flag(section)
@@ -674,6 +397,10 @@ def _setup_footer(doc, executor_name: str, executor_phone: str, config: dict) ->
     _apply_footer_paragraph_format(p2)
     _make_footer_run(p2, executor_phone, config)
 
+    # Line 3: empty line after executor info
+    p3 = footer.add_paragraph()
+    _apply_footer_paragraph_format(p3)
+
 
 # ---------------------------------------------------------------------------
 # Document creation
@@ -684,17 +411,17 @@ def create_document(content: dict, config: dict, output_path: Path) -> Path:
 
     Args:
         content: Dict with keys:
+            - doc_type: str — "spravka" (default) or "sz"
             - title: str — document title
             - addressee: str — "Должность\\nФИО"
-            - resume: str — resume block text
+            - resume/intro: str — first block text
             - details: str — details block text
-            - conclusions: str — conclusions block text
+            - conclusions/conclusion: str — last block text
             - appendices: list[str] — optional list of appendix items
             - signer_position: str — signer's position
             - signer_name: str — signer's full name
-            - executor_name: str — executor's FULL name for footer
-              (Фамилия Имя Отчество, NOT initials)
-            - executor_phone: str — internal phone number for footer
+            - executor_name: str — executor's name for footer
+            - executor_phone: str — executor's phone for footer
         config: Parsed config.json.
         output_path: Where to save the document.
 
@@ -704,45 +431,30 @@ def create_document(content: dict, config: dict, output_path: Path) -> Path:
     doc = Document()
     _setup_page(doc, config)
 
-    # --- Header table ---
+    # Determine document type
+    doc_type = content.get("doc_type", "spravka")
+    doc_types_cfg = config.get("doc_types", {})
+    dt_cfg = doc_types_cfg.get(doc_type, {})
+    conclusions_italic = dt_cfg.get("conclusions_style") == "italic"
+    title_font_size = config["formatting"].get("title_font_size_pt", 12)
+
+    # --- Header table (bold=False ALWAYS, title 12pt) ---
     title = content.get("title", "")
     addressee = content.get("addressee", "")
-    header_table = _create_1x2_table(doc, title, addressee, config,
-                                      left_bold=False, right_align_right=True,
-                                      left_pct=0.6)
-    # Header table only: zero cell margins so addressee right edge sits
-    # exactly at the page right margin; left-align title (not justify).
-    for cell in header_table.rows[0].cells:
-        _set_cell_margins(cell, left=0, right=0)
-    # Title cell: left-aligned, not justified
-    for p in header_table.rows[0].cells[0].paragraphs:
-        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    _create_1x2_table(doc, title, addressee, config,
+                       left_bold=False, right_bold=False,
+                       left_align="left", right_align="right",
+                       left_pct=0.6, left_font_size_pt=title_font_size)
 
-    # Add spacers before title in left cell
-    cell0 = header_table.rows[0].cells[0]
-    tc0 = cell0._tc
-    title_p = cell0.paragraphs[0]._element
-    for _ in range(4):
-        empty_p = OxmlElement("w:p")
-        pPr_el = OxmlElement("w:pPr")
-        sp = OxmlElement("w:spacing")
-        sp.set(qn("w:after"), "0")
-        sp.set(qn("w:before"), "0")
-        sp.set(qn("w:line"), "276")
-        sp.set(qn("w:lineRule"), "auto")
-        pPr_el.append(sp)
-        empty_p.append(pPr_el)
-        tc0.insert(tc0.index(title_p), empty_p)
-
-    # --- Two empty lines after header ---
+    # --- 2 empty lines after header ---
     _add_formatted_paragraph(doc, "", config)
     _add_formatted_paragraph(doc, "", config)
 
-    # --- Body: three blocks ---
-    # Block 1: Resume
-    resume_text = content.get("resume", "")
-    if resume_text:
-        for para_text in resume_text.split("\n\n"):
+    # --- Body: three blocks (NO separator paragraphs between them) ---
+    # Block 1: Resume / Intro
+    first_block_text = content.get("resume", "") or content.get("intro", "")
+    if first_block_text:
+        for para_text in first_block_text.split("\n\n"):
             if para_text.strip():
                 _add_formatted_paragraph(doc, para_text.strip(), config)
 
@@ -753,36 +465,40 @@ def create_document(content: dict, config: dict, output_path: Path) -> Path:
             if para_text.strip():
                 _add_formatted_paragraph(doc, para_text.strip(), config)
 
-    # Block 3: Conclusions
-    conclusions_text = content.get("conclusions", "")
+    # Block 3: Conclusions / Conclusion
+    conclusions_text = content.get("conclusions", "") or content.get("conclusion", "")
     if conclusions_text:
         for para_text in conclusions_text.split("\n\n"):
             if para_text.strip():
-                _add_formatted_paragraph(doc, para_text.strip(), config)
+                _add_formatted_paragraph(doc, para_text.strip(), config, italic=conclusions_italic)
 
-    # --- Appendix table (optional) ---
+    # --- Appendix table (optional, left col auto-fit to "Приложение:") ---
     appendices = content.get("appendices", [])
     if appendices:
         _add_formatted_paragraph(doc, "", config)
         appendix_label = config["structure"]["appendix"]["left_cell_text"]
-        appendix_table = _create_1x2_table(doc, appendix_label, "", config)
-        # Fill right cell with properly indented numbered list
-        _set_cell_numbered_list(appendix_table.rows[0].cells[1], appendices, config)
+        numbered_list = "\n".join(f"{i+1}. {item}" for i, item in enumerate(appendices))
+        # Auto-fit left column: ~1600 twips fits "Приложение:" in TNR 14pt
+        _create_1x2_table(doc, appendix_label, numbered_list, config,
+                           left_col_twips=1600)
 
-    # --- Signature table (1×2, border=nil, position left, name right) ---
+    # --- Signature table (left=LEFT, right=RIGHT) ---
     _add_formatted_paragraph(doc, "", config)
     signer_position = content.get("signer_position", "")
     signer_name = content.get("signer_name", "")
-    _create_signature_table(doc, signer_position, signer_name, config)
+    _create_1x2_table(doc, signer_position, signer_name, config,
+                       left_align="left", right_align="right",
+                       left_pct=0.62)
 
-    # --- Executor in body (NOT footer) ---
+    # --- Footer (executor info) ---
     executor_name = content.get("executor_name", "")
+    # Auto-lookup phone from config executors directory
     executor_phone = content.get("executor_phone", "")
+    if executor_name and not executor_phone:
+        executors = config.get("executors", {})
+        executor_phone = executors.get(executor_name, "")
     if executor_name:
-        _create_executor_table(doc, executor_name, executor_phone, config)
-
-    # --- Page numbering from page 2 ---
-    _setup_page_numbering(doc, config)
+        _setup_footer(doc, executor_name, executor_phone, config)
 
     doc.save(str(output_path))
     return output_path
@@ -825,10 +541,6 @@ def patch_document(source_path: Path, fixes: dict, config: dict,
     if fixes.get("fix_header_table") and doc.tables:
         _fix_header_table_grid(doc.tables[0], config)
 
-    # Fix appendix table grid/margins
-    if fixes.get("fix_appendix_table") and len(doc.tables) > 1:
-        _fix_appendix_table(doc.tables[1], config)
-
     # Replace paragraphs
     replacements = fixes.get("replace_paragraphs", {})
     for idx_str, new_text in replacements.items():
@@ -850,11 +562,7 @@ def patch_document(source_path: Path, fixes: dict, config: dict,
 
 
 def _fix_header_table_grid(table, config: dict) -> None:
-    """Fix header table: set full-width grid (60/40), right-align right cell.
-
-    Does NOT delete paragraphs — empty paragraphs in cell[0] serve as
-    vertical spacers to position the title below the addressee.
-    """
+    """Fix header table: set full-width grid (60/40), left=LEFT, right=RIGHT, no bold."""
     if len(table.columns) != 2:
         return
     total_twips = _page_width_twips(config)
@@ -862,72 +570,24 @@ def _fix_header_table_grid(table, config: dict) -> None:
     right_twips = total_twips - left_twips
     _set_table_grid(table, [left_twips, right_twips])
 
-    # Zero cell margins so text reaches the page margins exactly
-    for cell in table.rows[0].cells:
-        _set_cell_margins(cell, left=0, right=0)
-
-    # Remove indents from header table cells
-    for cell in table.rows[0].cells:
-        for p in cell.paragraphs:
-            p.paragraph_format.first_line_indent = None
-            p.paragraph_format.left_indent = None
-
-    # Title cell: left-aligned (not justify)
+    # Left cell: LEFT alignment, no bold
     for p in table.rows[0].cells[0].paragraphs:
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        for run in p.runs:
+            run.bold = False
 
-    # Right-align right cell (addressee)
+    # Right cell: RIGHT alignment, no bold
     for p in table.rows[0].cells[1].paragraphs:
         p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-
-
-def _fix_appendix_table(table, config: dict) -> None:
-    """Fix appendix table: set grid (20/80), zero cell margins, clean indents.
-
-    Does NOT touch numPr — preserves Word's native numbering in right cell.
-    """
-    if len(table.columns) != 2:
-        return
-    total_twips = _page_width_twips(config)
-    left_twips = int(total_twips * 0.2)
-    right_twips = total_twips - left_twips
-    _set_table_grid(table, [left_twips, right_twips])
-
-    # Zero cell margins for tight layout
-    for cell in table.rows[0].cells:
-        _set_cell_margins(cell, left=0, right=0)
-
-    # Remove table borders (border=nil on table + all cells)
-    _remove_table_borders(table)
-
-    # Clean indents in cells, but preserve numPr
-    for cell in table.rows[0].cells:
-        for p in cell.paragraphs:
-            if not _has_numPr(p):
-                p.paragraph_format.first_line_indent = None
-                p.paragraph_format.left_indent = None
-
-
-def _has_numPr(paragraph) -> bool:
-    """Check if a paragraph has Word numbering (numPr) attached."""
-    pPr = paragraph._element.find(qn("w:pPr"))
-    return pPr is not None and pPr.find(qn("w:numPr")) is not None
+        for run in p.runs:
+            run.bold = False
 
 
 def _fix_all_formatting(doc, config: dict) -> None:
-    """Reapply correct formatting to all paragraphs and runs.
-
-    Special cases:
-    - Body paragraphs with leading \\t: strip the tab (firstLine handles indent).
-    - Table cell paragraphs with numPr: do NOT override indent (would break
-      Word's native numbering layout).
-    """
+    """Reapply correct formatting to all paragraphs and runs."""
     for paragraph in doc.paragraphs:
         _apply_paragraph_format(paragraph, config)
         for run in paragraph.runs:
-            # Strip leading tabs — firstLine indent handles the red line
-            if run.text.startswith("\t"):
-                run.text = run.text.lstrip("\t")
             _apply_run_format(run, config)
 
     # Fix tables (text formatting + grid)
@@ -939,10 +599,6 @@ def _fix_all_formatting(doc, config: dict) -> None:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
                     _apply_paragraph_format(paragraph, config)
-                    # Preserve Word numbering indent — don't clobber with firstLine
-                    if _has_numPr(paragraph):
-                        paragraph.paragraph_format.first_line_indent = None
-                        paragraph.paragraph_format.left_indent = None
                     for run in paragraph.runs:
                         _apply_run_format(run, config)
 
