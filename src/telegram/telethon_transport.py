@@ -113,6 +113,11 @@ class TelethonTransport:
             if not sender:
                 return
 
+            # Skip private messages from bots (e.g. OSINT bot responses)
+            if event.is_private and getattr(sender, "bot", False):
+                logger.debug(f"Skipping bot message from {sender.id} (@{getattr(sender, 'username', '?')})")
+                return
+
             # Определяем тип документа
             doc_name: str | None = None
             doc_size: int | None = None

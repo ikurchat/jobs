@@ -14,12 +14,15 @@ import sys
 
 from osint_utils import (
     get_telethon_client,
+    acquire_session_lock,
+    should_retry,
     wait_for_response,
     wait_for_message_edit,
     click_inline_button,
     save_result,
     detect_query_type,
     is_insufficient_balance,
+    is_subscription_required,
     parse_balance,
     log_spend,
 )
@@ -154,6 +157,16 @@ async def send_query(query: str) -> dict:
                         "bot": resolve_result.get("username"),
                     }
 
+                # Check for subscription requirement
+                if is_subscription_required(text):
+                    return {
+                        "status": "error",
+                        "error": "subscription_required",
+                        "text": text,
+                        "bot": resolve_result.get("username"),
+                        "message": "Bot requires channel subscription. Subscribe and retry.",
+                    }
+
                 # Check for captcha button
                 captcha_clicked = False
                 if response.reply_markup:
@@ -183,19 +196,44 @@ async def send_query(query: str) -> dict:
                 }
 
             except Exception as e:
-                err_str = str(e).lower()
-                if "floodwait" in err_str or "flood" in err_str:
-                    wait_match = re.search(r"(\d+)", err_str)
-                    wait_time = int(wait_match.group(1)) if wait_match else RETRY_PAUSE
-                    if attempt < MAX_RETRIES:
-                        await asyncio.sleep(wait_time)
-                        continue
-                if attempt < MAX_RETRIES:
-                    await asyncio.sleep(RETRY_PAUSE)
+                retry, pause = should_retry(e, attempt, MAX_RETRIES, RETRY_PAUSE)
+                if retry:
+                    await asyncio.sleep(pause)
                     continue
                 return {"status": "error", "error": str(e), "attempt": attempt + 1}
 
         return {"status": "error", "error": "exhausted_retries"}
+
+
+async def _wait_for_edit_or_new(
+    client, entity, message_id: int,
+    original_text: str = "",
+    original_edit_date=None,
+    timeout: int = 20,
+    poll_interval: int = 2,
+):
+    """Single polling loop that checks both message edit and new incoming message.
+
+    Returns the first result found (edited message or new message), or None.
+    """
+    import time
+    bot_id = getattr(entity, "id", None)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        # Check edit
+        msg = await client.get_messages(entity, ids=message_id)
+        if msg:
+            if msg.edit_date != original_edit_date or (msg.text or "") != (original_text or ""):
+                return msg
+        # Check new message
+        messages = await client.get_messages(entity, limit=5)
+        for m in messages:
+            if m.id > message_id and not getattr(m, "out", False):
+                sender_id = getattr(m, "sender_id", None)
+                if sender_id == bot_id:
+                    return m
+        await asyncio.sleep(poll_interval)
+    return None
 
 
 async def get_detail(
@@ -258,43 +296,14 @@ async def get_detail(
                     "available_buttons": buttons_text,
                 }
 
-            # Wait for response — check BOTH message edit and new message
-            # Pass pre-click state to avoid race condition
-            edit_task = asyncio.create_task(
-                wait_for_message_edit(
-                    client, entity, message_id, timeout=15,
-                    original_text=original_text,
-                    original_edit_date=original_edit_date,
-                )
-            )
-            new_msg_task = asyncio.create_task(
-                wait_for_response(client, entity, message_id, timeout=15)
-            )
-
-            done, pending = await asyncio.wait(
-                [edit_task, new_msg_task],
+            # Wait for response — single loop checks BOTH edit and new message
+            # (avoids two parallel tasks doubling API calls)
+            result_msg = await _wait_for_edit_or_new(
+                client, entity, message_id,
+                original_text=original_text,
+                original_edit_date=original_edit_date,
                 timeout=20,
-                return_when=asyncio.FIRST_COMPLETED,
             )
-
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
-
-            result_msg = None
-            for task in done:
-                try:
-                    result = task.result()
-                    if result:
-                        result_msg = result
-                        break
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    pass
 
             if not result_msg:
                 return {"status": "error", "error": "no_detail_response"}

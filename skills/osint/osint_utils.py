@@ -13,6 +13,9 @@ CLI:
 """
 
 import asyncio
+import atexit
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -24,6 +27,9 @@ from pathlib import Path
 # Lazy import — telethon available only inside Docker container
 TelegramClient = None
 StringSession = None
+
+# Sentinel for "not provided" (distinct from None)
+_UNSET = object()
 
 
 def _ensure_telethon():
@@ -42,14 +48,66 @@ def _ensure_telethon():
 OSINT_DIR = Path("/workspace/osint")
 SESSION_PATH = Path("/data/telethon.session")
 SPEND_LOG_PATH = OSINT_DIR / ".spend_log.json"
+LOCK_PATH = Path("/data/telethon.lock")
 
 # ---------------------------------------------------------------------------
-# Telethon client
+# File lock — prevent parallel OSINT scripts on the same session
 # ---------------------------------------------------------------------------
+
+_lock_fd = None
+
+
+def acquire_session_lock():
+    """Acquire exclusive lock on the Telethon session. Non-blocking, raises on conflict."""
+    global _lock_fd
+    if _lock_fd is not None:
+        return  # already held
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _lock_fd = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(_lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        _lock_fd.close()
+        _lock_fd = None
+        raise RuntimeError(
+            "Another OSINT process is already running (telethon.lock held). "
+            "Wait for it to finish or remove /data/telethon.lock manually."
+        )
+    atexit.register(_release_session_lock)
+
+
+def _release_session_lock():
+    global _lock_fd
+    if _lock_fd is not None:
+        try:
+            fcntl.flock(_lock_fd.fileno(), fcntl.LOCK_UN)
+            _lock_fd.close()
+        except OSError:
+            pass
+        _lock_fd = None
+        try:
+            LOCK_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Telethon client (singleton per process)
+# ---------------------------------------------------------------------------
+
+_singleton_client = None
 
 
 def get_telethon_client():
-    """Create a Telethon client from the stored StringSession."""
+    """Return a (re-usable) Telethon client from the stored StringSession.
+
+    Within a single process the same client instance is returned to avoid
+    opening multiple TCP connections (3-5 per OSINT cycle).
+    """
+    global _singleton_client
+    if _singleton_client is not None:
+        return _singleton_client
+
     _ensure_telethon()
     if not SESSION_PATH.exists():
         raise FileNotFoundError(
@@ -73,7 +131,41 @@ def get_telethon_client():
         system_version="23.5.0",
         app_version="1.36.0",
     )
+    _singleton_client = client
     return client
+
+
+# ---------------------------------------------------------------------------
+# Retry helper (shared by sherlock and cilord)
+# ---------------------------------------------------------------------------
+
+
+def should_retry(error, attempt: int, max_retries: int, base_pause: int = 30) -> tuple[bool, int]:
+    """Decide whether to retry after an error and how long to wait.
+
+    Returns (should_retry: bool, pause_seconds: int).
+    """
+    if attempt >= max_retries:
+        return False, 0
+    err_str = str(error).lower()
+    if "floodwait" in err_str or "flood" in err_str:
+        wait_match = re.search(r"(\d+)", err_str)
+        pause = int(wait_match.group(1)) if wait_match else base_pause
+        return True, pause
+    return True, base_pause
+
+
+# ---------------------------------------------------------------------------
+# Markdown stripping (for balance parsing)
+# ---------------------------------------------------------------------------
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove Telegram markdown formatting: **, __, ~~, ||, `, *, _."""
+    text = re.sub(r"\*\*|__|\~\~|\|\||`", "", text)
+    # Single * and _ only if not part of words — just strip them all
+    text = text.replace("*", "").replace("_", "")
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -149,15 +241,15 @@ async def wait_for_message_edit(
     message_id: int,
     timeout: int = 15,
     poll_interval: int = 2,
-    original_text: str | None = None,
-    original_edit_date=None,
+    original_text=_UNSET,
+    original_edit_date=_UNSET,
 ):
     """Wait for a specific message to be edited (inline-button response pattern).
 
     If original_text/original_edit_date are provided, use them as baseline
     (avoids race condition when edit happens between click and this call).
     """
-    if original_text is None or original_edit_date is ...:
+    if original_text is _UNSET or original_edit_date is _UNSET:
         original = await client.get_messages(entity, ids=message_id)
         if not original:
             return None
@@ -168,7 +260,7 @@ async def wait_for_message_edit(
     while time.time() < deadline:
         msg = await client.get_messages(entity, ids=message_id)
         if msg:
-            if msg.edit_date != original_edit_date or (msg.text or "") != original_text:
+            if msg.edit_date != original_edit_date or (msg.text or "") != (original_text or ""):
                 return msg
         await asyncio.sleep(poll_interval)
     return None
@@ -197,8 +289,29 @@ async def click_inline_button(message, target_text: str) -> bool:
                 if getattr(button, "data", None) is not None:
                     await message.click(i, j)
                     return True
-                # Non-callback button (URL, switch-inline) — cannot be clicked
-                return False
+                # Non-callback button (URL, switch-inline) — skip, check remaining
+                continue
+    return False
+
+
+async def click_by_callback_data(message, target_data: str | bytes) -> bool:
+    """Find an inline button by exact callback data match and click it.
+
+    More reliable than text matching when button labels change (e.g. constructor
+    fields that show '✔ VALUE' when filled vs plain label when empty).
+    """
+    if not message or not message.reply_markup:
+        return False
+    if not hasattr(message.reply_markup, "rows"):
+        return False
+    if isinstance(target_data, str):
+        target_data = target_data.encode()
+    for i, row in enumerate(message.reply_markup.rows):
+        for j, button in enumerate(row.buttons):
+            data = getattr(button, "data", None)
+            if data == target_data:
+                await message.click(i, j)
+                return True
     return False
 
 
@@ -208,8 +321,17 @@ async def click_inline_button(message, target_text: str) -> bool:
 
 
 def _sanitize_value(query_value: str) -> str:
-    """Sanitize query value for use in filesystem paths. ASCII-only."""
-    return re.sub(r"[^a-zA-Z0-9_@.+\-]", "_", query_value)
+    """Sanitize query value for use in filesystem paths.
+
+    For values with non-ASCII chars (e.g. Cyrillic FIO) a sha256 prefix is
+    prepended to avoid collisions — otherwise all Cyrillic chars map to '_'.
+    """
+    sanitized = re.sub(r"[^a-zA-Z0-9_@.+\-]", "_", query_value)
+    # If the original had non-ASCII, add a hash prefix to prevent collisions
+    if re.search(r"[^\x00-\x7F]", query_value):
+        prefix = hashlib.sha256(query_value.encode()).hexdigest()[:8]
+        sanitized = f"{prefix}_{sanitized}"
+    return sanitized
 
 
 def _cache_dir(query_type: str, query_value: str) -> Path | None:
@@ -271,20 +393,25 @@ def save_result(
 # ---------------------------------------------------------------------------
 
 INSUFFICIENT_BALANCE_PHRASES = [
-    "недостаточно",
-    "not enough",
+    "недостаточно средств",
+    "недостаточно кредитов",
+    "not enough credits",
+    "not enough balance",
     "баланс исчерпан",
-    "пополните",
+    "пополните баланс",
+    "пополните счёт",
+    "пополните счет",
     "лимит превышен",
     "нет средств",
-    "top up",
-    "no credits",
+    "top up your balance",
+    "no credits left",
     "no balance",
-    "оплат",
+    "требуется оплата",
+    "необходимо оплатить",
     "balance is 0",
     "баланс: 0",
-    "закончились",
-    "исчерпан",
+    "кредиты закончились",
+    "запросы закончились",
 ]
 
 BALANCE_PATTERNS = [
@@ -302,12 +429,31 @@ def is_insufficient_balance(text: str) -> bool:
     return any(phrase in lower for phrase in INSUFFICIENT_BALANCE_PHRASES)
 
 
+SUBSCRIPTION_REQUIRED_PHRASES = [
+    "подпишитесь на канал",
+    "подпишись на канал",
+    "subscribe to channel",
+    "subscribe to the channel",
+    "для использования бота подпишитесь",
+    "необходимо подписаться",
+]
+
+
+def is_subscription_required(text: str) -> bool:
+    """Check if a bot response requires channel subscription."""
+    if not text:
+        return False
+    lower = _strip_markdown(text).lower()
+    return any(phrase in lower for phrase in SUBSCRIPTION_REQUIRED_PHRASES)
+
+
 def parse_balance(text: str) -> int | None:
     """Extract a numeric balance from bot response text."""
     if not text:
         return None
+    clean = _strip_markdown(text)
     for pattern in BALANCE_PATTERNS:
-        match = re.search(pattern, text, re.IGNORECASE)
+        match = re.search(pattern, clean, re.IGNORECASE)
         if match:
             return int(match.group(1))
     return None
@@ -418,6 +564,22 @@ _DOC_COMMANDS = {
 _FIO_RE = re.compile(
     r"^[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?(?:\s+\d{2}\.\d{2}\.\d{4})?$"
 )
+
+
+def validate_fio_query(query_value: str) -> dict:
+    """Validate FIO query has enough data for Sherlock.
+    Returns {"valid": True, "has": [...]} or {"valid": False, "missing": [...]}.
+    """
+    has, missing = [], []
+    if re.search(r"\d{2}\.\d{2}\.\d{4}", query_value):
+        has.append("dob")
+    else:
+        missing.append("dob (DD.MM.YYYY)")
+    if re.search(r"[78]\d{10}", query_value):
+        has.append("phone")
+    else:
+        missing.append("phone")
+    return {"valid": bool(has), "has": has, "missing": missing}
 
 
 def detect_query_type(text: str) -> tuple[str, str]:

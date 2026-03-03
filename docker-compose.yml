@@ -13,6 +13,9 @@ services:
       - CLAUDE_MODEL_FAST=${CLAUDE_MODEL_FAST:-claude-haiku-4-5-20251001}
       - GMAIL_EMAIL=${GMAIL_EMAIL}
       - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - NO_PROXY=osint,browser,localhost,127.0.0.1
+      - no_proxy=osint,browser,localhost,127.0.0.1
     volumes:
       - ./data:/data              # Персистентные данные (сессия, БД)
       - ./data/.claude:/home/jobs/.claude  # Claude Code credentials
@@ -20,6 +23,8 @@ services:
       - ./skills:/workspace/.claude/skills  # Skills для SDK
       - browser-recordings:/recordings:ro  # Аудио-записи из браузера (read-only)
       - browser-control:/browser-control    # Управление браузером (proxy toggle)
+    ports:
+      - "127.0.0.1:8081:8080"    # Config API — localhost only (for Jobsy)
     restart: unless-stopped
     stdin_open: true              # Для интерактивного логина
     tty: true
@@ -49,6 +54,27 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+
+  osint:
+    build: ./osint-mcp
+    init: true
+    environment:
+      - TZ=${TZ:-Europe/Moscow}
+      - TG_API_ID=${TG_API_ID}
+      - TG_API_HASH=${TG_API_HASH}
+    volumes:
+      - ./data/telethon.session:/data/telethon.session:ro
+      - jobs-workspace:/workspace
+    ports:
+      - "127.0.0.1:8400:8400"    # localhost (host health checks)
+      - "172.17.0.1:8400:8400"   # docker0 bridge (cross-compose via host.docker.internal)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8400/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   updater:
     build: ./updater

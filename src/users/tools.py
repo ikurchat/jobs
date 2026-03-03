@@ -142,11 +142,23 @@ async def list_tasks(args: dict[str, Any]) -> dict[str, Any]:
     assignee_id = None
     user_name = None
     if user_query:
-        user = await repo.find_user(user_query)
-        if not user:
-            return _error(f"Пользователь '{user_query}' не найден")
-        assignee_id = user.telegram_id
-        user_name = user.display_name
+        # Check if query refers to the owner (not in external_users table)
+        from src.config import settings
+        _q = user_query.strip().lower()
+        _is_owner = False
+        if _q.isdigit() and int(_q) in settings.tg_owner_ids:
+            _is_owner = True
+        elif _q in ("owner", "я", "мои", "my", "свои"):
+            _is_owner = True
+        if _is_owner:
+            # Owner's tasks: skip user filter, show all (owner = created_by)
+            user_query = None
+        else:
+            user = await repo.find_user(user_query)
+            if not user:
+                return _error(f"Пользователь '{user_query}' не найден")
+            assignee_id = user.telegram_id
+            user_name = user.display_name
 
     tasks = await repo.list_tasks(
         assignee_id=assignee_id,

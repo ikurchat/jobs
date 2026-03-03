@@ -28,8 +28,18 @@ class MCPServerConfig:
     description: str = ""
     source: str = "manual"  # manual, registry
 
+    # SSE support
+    server_type: str = ""  # "" = stdio, "sse" = SSE
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+
     def to_mcp_json(self) -> dict[str, Any]:
         """Конвертирует в формат .mcp.json."""
+        if self.server_type == "sse":
+            result: dict[str, Any] = {"type": "sse", "url": self.url}
+            if self.headers:
+                result["headers"] = self.headers
+            return result
         return {
             "command": self.command,
             "args": self.args,
@@ -155,6 +165,9 @@ class MCPConfigStorage:
                     title=server_data.get("title", name),
                     description=server_data.get("description", ""),
                     source=server_data.get("source", "manual"),
+                    server_type=server_data.get("type", server_data.get("server_type", "")),
+                    url=server_data.get("url", ""),
+                    headers=server_data.get("headers", {}),
                 )
             return MCPConfig(servers=servers)
         except Exception as e:
@@ -163,20 +176,26 @@ class MCPConfigStorage:
 
     def save(self, config: MCPConfig) -> None:
         """Сохраняет конфигурацию."""
-        data = {
-            "servers": {
-                name: {
-                    "command": s.command,
-                    "args": s.args,
-                    "env": s.env,
-                    "enabled": s.enabled,
-                    "title": s.title,
-                    "description": s.description,
-                    "source": s.source,
-                }
-                for name, s in config.servers.items()
-            }
+        data: dict[str, Any] = {
+            "servers": {}
         }
+        for name, s in config.servers.items():
+            entry: dict[str, Any] = {
+                "enabled": s.enabled,
+                "title": s.title,
+                "description": s.description,
+                "source": s.source,
+            }
+            if s.server_type == "sse":
+                entry["type"] = "sse"
+                entry["url"] = s.url
+                if s.headers:
+                    entry["headers"] = s.headers
+            else:
+                entry["command"] = s.command
+                entry["args"] = s.args
+                entry["env"] = s.env
+            data["servers"][name] = entry
 
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(json.dumps(data, indent=2, ensure_ascii=False))

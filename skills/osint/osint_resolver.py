@@ -22,7 +22,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from osint_utils import get_telethon_client, wait_for_response
+from osint_utils import get_telethon_client
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -83,15 +83,15 @@ def _get_cached(name: str) -> str | None:
 
 
 async def validate_bot(client, username: str, timeout: int = 15) -> bool:
-    """Validate that a bot responds to /start within timeout."""
+    """Validate that a username resolves to a working Telegram bot.
+
+    Uses get_entity() + bot flag check — NO /start sent.
+    This avoids: junk messages in chat, after_id shifts, flood risk with
+    multiple candidates.
+    """
     try:
         entity = await client.get_entity(username)
-        last_msg = await client.get_messages(entity, limit=1)
-        after_id = last_msg[0].id if last_msg else 0
-
-        await client.send_message(entity, "/start")
-        response = await wait_for_response(client, entity, after_id, timeout=timeout)
-        return response is not None
+        return getattr(entity, "bot", False) is True
     except Exception:
         return False
 

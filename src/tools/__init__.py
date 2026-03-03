@@ -9,6 +9,7 @@ MCP Tools для Claude.
 from claude_agent_sdk import create_sdk_mcp_server
 
 from src.tools.scheduler import SCHEDULER_TOOLS
+from src.tools.osint_proxy import OSINT_TOOLS, OSINT_TOOL_NAMES
 from src.memory.tools import MEMORY_TOOLS, MEMORY_TOOL_NAMES
 from src.mcp_manager.tools import MCP_MANAGER_TOOLS, MCP_MANAGER_TOOL_NAMES
 from src.plugin_manager.tools import PLUGIN_MANAGER_TOOLS, PLUGIN_MANAGER_TOOL_NAMES
@@ -38,6 +39,7 @@ ALL_TOOLS = [
     *OWNER_TOOLS,
     *EXTERNAL_USER_TOOLS,
     *TELEGRAM_TOOLS,
+    *OSINT_TOOLS,
 ]
 
 
@@ -92,6 +94,8 @@ OWNER_ALLOWED_TOOLS = [
     *TELEGRAM_TOOL_NAMES,
     # Browser (@playwright/mcp)
     *BROWSER_TOOL_NAMES,
+    # OSINT (proxy to osint:8400 REST API)
+    *OSINT_TOOL_NAMES,
     # Skills (SDK native support via setting_sources=["project"])
     "Skill",
 ]
@@ -119,6 +123,8 @@ def get_owner_allowed_tools() -> list[str]:
         *get_available_telegram_tool_names(),
         # Browser (@playwright/mcp)
         *BROWSER_TOOL_NAMES,
+        # OSINT (proxy to osint:8400 REST API)
+        *OSINT_TOOL_NAMES,
         # Skills
         "Skill",
     ]
