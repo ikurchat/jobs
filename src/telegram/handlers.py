@@ -462,8 +462,10 @@ class TelegramHandlers:
 
         except Exception as e:
             logger.error(f"Error: {e}")
+            from src.api import log_error
+            log_error("api_error", str(e), f"user:{user_id}")
             await status.delete()
-            await transport.reply(msg, f"Ошибка: {e}")
+            await transport.reply(msg, "Произошла ошибка. Детали в панели управления.")
 
         finally:
             await typing.stop()
@@ -587,8 +589,10 @@ class TelegramHandlers:
 
         except Exception as e:
             logger.error(f"Group message error: {e}")
+            from src.api import log_error
+            log_error("api_error", str(e), f"group:{msg.chat_id}")
             await status.delete()
-            await transport.reply(msg, f"Ошибка: {e}")
+            await transport.reply(msg, "Произошла ошибка. Детали в панели управления.")
 
         finally:
             await typing.stop()

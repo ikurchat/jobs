@@ -461,7 +461,9 @@ class UserSession:
 
         except Exception as e:
             logger.error(f"Query error [{self.telegram_id}]: {type(e).__name__}: {e}")
-            yield (f"Ошибка: {e}", None, True)
+            from src.api import log_error
+            log_error("api_error", str(e), f"user:{self.telegram_id}")
+            yield (self._friendly_error(e), None, True)
             return
 
         finally:
@@ -481,6 +483,24 @@ class UserSession:
             self._session_file.unlink()
         self._clear_incoming_file()
         logger.debug(f"Session destroyed [{self.telegram_id}]")
+
+    @staticmethod
+    def _friendly_error(e: Exception) -> str:
+        """Преобразует техническую ошибку API в понятное сообщение."""
+        msg = str(e).lower()
+        if "could not process image" in msg:
+            return "Не удалось обработать изображение. Попробуй отправить в другом формате (JPG/PNG)."
+        if "image" in msg and ("too large" in msg or "size" in msg):
+            return "Изображение слишком большое. Попробуй уменьшить размер."
+        if "rate limit" in msg or "429" in msg:
+            return "Превышен лимит запросов, подожди немного и попробуй снова."
+        if "overloaded" in msg or "529" in msg or "503" in msg:
+            return "Сервис временно перегружен, попробуй через пару минут."
+        if "authentication" in msg or "401" in msg:
+            return "Ошибка авторизации. Обратись к администратору."
+        if "context" in msg and ("long" in msg or "length" in msg or "too many" in msg):
+            return "Контекст беседы слишком длинный. Попробуй /clear и начни заново."
+        return "Произошла ошибка при обработке запроса. Попробуй ещё раз."
 
     def reset(self) -> None:
         """Сбрасывает сессию (sync версия для /clear)."""

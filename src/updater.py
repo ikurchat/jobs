@@ -44,11 +44,11 @@ class Updater:
         if "error" in info:
             return f"\u274c Ошибка: {info['error']}"
 
-        if not info["commits"]:
-            return f"\u2705 Последняя версия ({info['current'][:7]})"
+        if not info.get("commits"):
+            return f"\u2705 Последняя версия ({info.get('current', '?')[:7]})"
 
         self._pending_at = time.monotonic()
-        self._notified_latest = info["latest"]
+        self._notified_latest = info.get("latest", "")
         lines = [f"- [{c['hash'][:7]}] {c['message']}" for c in info["commits"]]
         return (
             "\U0001f918 Доступно обновление\n\n"
@@ -59,9 +59,9 @@ class Updater:
     async def check_for_notification(self) -> str | None:
         """Проверяет обновления для автоуведомления. Возвращает текст или None."""
         info = await self._check()
-        if "error" in info or not info["commits"]:
+        if "error" in info or not info.get("commits"):
             return None
-        if info["latest"] == self._notified_latest:
+        if info.get("latest") == self._notified_latest:
             return None
         self._notified_latest = info["latest"]
         lines = [f"- [{c['hash'][:7]}] {c['message']}" for c in info["commits"]]

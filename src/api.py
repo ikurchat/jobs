@@ -9,6 +9,8 @@ import hmac
 import json
 import os
 import types
+from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin
 
@@ -22,6 +24,23 @@ from src.config import (
     save_overrides,
     settings,
 )
+
+# ---------------------------------------------------------------------------
+# Error log (in-memory, survives until restart)
+# ---------------------------------------------------------------------------
+
+_errors: deque[dict] = deque(maxlen=100)
+
+
+def log_error(error_type: str, message: str, context: str = "") -> None:
+    """Record an error for the /errors API. Thread/task-safe (deque is atomic)."""
+    _errors.append({
+        "ts": datetime.now(timezone.utc).astimezone().isoformat(),
+        "type": error_type,  # api_error | timeout | internal
+        "message": str(message)[:500],
+        "context": str(context)[:200],
+    })
+
 
 # Поля, содержащие секреты — маскируются в GET /config
 _SECRET_FIELDS: frozenset[str] = frozenset({
@@ -164,6 +183,21 @@ def create_app() -> FastAPI:
             save_overrides(current)
 
         return _build_config_response()
+
+    @app.get("/errors")
+    async def get_errors(
+        authorization: str = Header(...),
+    ) -> list[dict]:
+        _verify_secret(authorization)
+        return list(_errors)
+
+    @app.delete("/errors")
+    async def clear_errors(
+        authorization: str = Header(...),
+    ) -> dict[str, str]:
+        _verify_secret(authorization)
+        _errors.clear()
+        return {"status": "ok"}
 
     @app.post("/credentials")
     async def update_credentials(
