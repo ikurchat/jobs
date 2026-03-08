@@ -27,8 +27,12 @@ CIPHERS = "GOST2012-GOST8912-GOST8912"
 PORT = int(os.environ.get("PROXY_PORT", "8443"))
 
 
-def _curl(url, method="GET", headers=None, data=None, dump_headers=False):
-    """Execute curl with GOST TLS."""
+def _curl(url, method="GET", headers=None, data=None, dump_headers=False,
+          raw=False):
+    """Execute curl with GOST TLS.
+
+    If raw=True, returns bytes without decoding (for binary files).
+    """
     cmd = [
         "curl", "-sk", "--connect-timeout", "15", "--max-time", "60",
         "--cert", CERT_PATH, "--key", KEY_PATH,
@@ -45,14 +49,16 @@ def _curl(url, method="GET", headers=None, data=None, dump_headers=False):
 
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=65)
+        if raw:
+            return result.stdout
         try:
             return result.stdout.decode("utf-8")
         except UnicodeDecodeError:
             return result.stdout.decode("windows-1251", errors="replace")
     except subprocess.TimeoutExpired:
-        return '{"error": "timeout"}'
+        return b"" if raw else '{"error": "timeout"}'
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return b"" if raw else json.dumps({"error": str(e)})
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -100,15 +106,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
 
         if self.path.startswith("/file/"):
-            # Download file (document page image)
+            # Download file (document page image) — raw binary
             file_path = self.path[5:]  # remove /file prefix
             cookies = self._get_cookies()
             headers = {}
             if cookies:
                 headers["Cookie"] = cookies
-            raw = _curl(f"https://{SERVER}:444{file_path}", headers=headers)
-            # Might be binary (JPEG)
-            self._send_response(raw or b"", content_type="application/octet-stream")
+            data = _curl(f"https://{SERVER}:444{file_path}", headers=headers,
+                         raw=True)
+            self._send_response(data or b"", content_type="application/octet-stream")
             return
 
         self._send_response('{"error": "unknown endpoint"}', status=404)

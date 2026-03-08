@@ -62,7 +62,7 @@ def _parse_dnsid(raw: str) -> str:
 
 def _parse_auth_token(raw: str, dnsid: str) -> str:
     """Extract auth_token from proxy response headers."""
-    pattern = rf"auth_token_n_{re.escape(dnsid)}=([a-zA-Z0-9_-]+)"
+    pattern = rf"auth_token_n_{re.escape(dnsid)}=([^;\s]+)"
     m = re.search(pattern, raw)
     return m.group(1) if m else ""
 
