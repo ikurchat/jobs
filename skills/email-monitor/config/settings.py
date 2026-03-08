@@ -35,15 +35,9 @@ def get_gmail_credentials() -> tuple[str, str]:
     return email, app_password
 
 
-def get_baserow_token() -> str:
-    token = os.environ.get("BASEROW_TOKEN") or os.environ.get("BASEROW_API_TOKEN", "")
-    if not token:
-        output_error("BASEROW_TOKEN не задан")
-    return token
-
-
-def get_baserow_url() -> str:
-    return os.environ.get("BASEROW_URL", "https://api.baserow.io")
+def get_db_path() -> str:
+    cfg = load_config()
+    return cfg.get("db_path", "/data/email_learning.db")
 
 
 def get_work_dir() -> Path:

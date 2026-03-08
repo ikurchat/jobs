@@ -1,0 +1,17 @@
+{
+  "sherlock": {
+    "personal_bot": "@Osijtttttyyghuuijjjiijjbot",
+    "use_resolver": false,
+    "channel": "@report_sherlok",
+    "default_country": "RU"
+  },
+  "cilord": {
+    "personal_bot": null,
+    "use_resolver": true,
+    "bitly_url": "http://bit.ly/4kIt4t9"
+  },
+  "cache_dir": "/workspace/osint",
+  "cache_max_age_hours": 24,
+  "spend_log": "/workspace/osint/.spend_log.json",
+  "bot_urls": "/workspace/osint/.bot_urls.json"
+}

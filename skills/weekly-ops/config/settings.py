@@ -19,35 +19,11 @@ def load_config(config_path: Path | None = None) -> dict:
         return json.load(f)
 
 
-def get_baserow_url() -> str:
-    """Get Baserow URL from environment. Raises RuntimeError if not set."""
-    url = os.environ.get("BASEROW_URL")
-    if not url:
-        raise RuntimeError("BASEROW_URL environment variable is not set")
-    if url.startswith("http://"):
-        url = url.replace("http://", "https://", 1)
-    return url.rstrip("/")
-
-
-def get_baserow_token() -> str:
-    """Get Baserow API token from environment. Raises RuntimeError if not set."""
-    token = os.environ.get("BASEROW_TOKEN") or os.environ.get("BASEROW_API_TOKEN")
-    if not token:
-        raise RuntimeError(
-            "BASEROW_TOKEN (or BASEROW_API_TOKEN) environment variable is not set"
-        )
-    return token
-
-
-def get_table_id(config: dict, table_name: str) -> int:
-    """Get Baserow table ID from config. Raises ValueError if not configured."""
-    table_id = config.get("baserow", {}).get("tables", {}).get(table_name)
-    if table_id is None:
-        raise ValueError(
-            f"Table '{table_name}' is not configured in config.json. "
-            f"Create the table in Baserow and set the ID."
-        )
-    return int(table_id)
+def get_db_path(config: dict | None = None) -> str:
+    """Get SQLite database path from config."""
+    if config is None:
+        config = load_config()
+    return config.get("db_path", "/data/weekly_ops.db")
 
 
 # ---------------------------------------------------------------------------

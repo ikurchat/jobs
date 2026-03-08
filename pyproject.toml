@@ -18,6 +18,8 @@ dependencies = [
     "qrcode>=7.0",
     "fastapi>=0.115.0",
     "uvicorn>=0.32.0",
+    "msoffcrypto-tool>=5.0.0",
+    "requests>=2.31.0",
 ]
 
 [build-system]

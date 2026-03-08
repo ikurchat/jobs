@@ -37,9 +37,12 @@ tools:
 GMAIL_EMAIL=<your-email@gmail.com>
 GMAIL_APP_PASSWORD=<app password>
 DOCX_DECRYPT_PASSWORD=<decrypt password for encrypted .docx>
-BASEROW_TOKEN=<token>
-BASEROW_URL=https://api.baserow.io
 ```
+
+## Database
+
+Feedback и профили хранятся в SQLite: `/data/email_learning.db`
+Таблицы: `sender_profiles`, `email_feedback`, `stop_words` — создаются автоматически.
 
 ## Work Directory
 
@@ -84,7 +87,7 @@ cd /workspace/.claude/skills/email-monitor && PYTHONPATH=. python3 -m services.g
 
 2. Сохранить результат в `/dev/shm/email-monitor/inbox.json`
 
-3. Загрузить feedback-историю (если Baserow tables настроены):
+3. Загрузить feedback-историю из БД:
 ```bash
 cd /workspace/.claude/skills/email-monitor && PYTHONPATH=. python3 -m services.feedback history --limit 200
 ```
@@ -171,10 +174,7 @@ cd /workspace/.claude/skills/email-monitor && PYTHONPATH=. python3 -m services.p
 ```
 
 5. Предложить owner'у черновик задачи в формате выше
-6. После подтверждения — вызвать task-control:
-```bash
-cd /workspace/.claude/skills/task-control && PYTHONPATH=. python3 -m services.baserow create <tasks_table_id> --data '<task_json>'
-```
+6. После подтверждения — создать задачу через task-control (используя доступный метод БД).
 7. Пометить письмо: status=task_created, task_id=<id>
 8. Записать feedback: отправитель → действие "create_task"
 
@@ -193,6 +193,31 @@ cd /workspace/.claude/skills/email-monitor && PYTHONPATH=. python3 -m services.f
 
 3. **Правило обучения**: после 3 одинаковых решений по одному отправителю →
    confidence ≥ 0.7 → классификатор начинает автоматически предлагать это действие
+
+### CORRECTION — Коррекция пропущенного
+
+Если owner говорит "ты пропустил важное", "это было важно", "почему не показал":
+
+```bash
+cd /workspace/.claude/skills/email-monitor && PYTHONPATH=. python3 -m services.feedback correct --sender <email> --priority <correct_priority> --note "описание"
+```
+
+Коррекция = **двойной вес** (confidence += increment × 2). Профиль отправителя обновляется сразу.
+
+### STOP_WORDS — Фильтрация нежелательных тем
+
+Если owner говорит "не показывай письма про X", "X неинтересно":
+
+```bash
+cd /workspace/.claude/skills/email-monitor && PYTHONPATH=. python3 -m services.feedback stop_word --add "<слово>"
+```
+
+При FETCH — проверять subject и body_preview на стоп-слова. Если совпадение → НЕ включать в сводку.
+
+Посмотреть текущие стоп-слова:
+```bash
+cd /workspace/.claude/skills/email-monitor && PYTHONPATH=. python3 -m services.feedback stop_word --list
+```
 
 ### STATS — Статистика обучения
 
@@ -262,7 +287,7 @@ cd /workspace/.claude/skills/email-monitor && PYTHONPATH=. python3 -m services.a
 - App password хранится ТОЛЬКО в env var, НИКОГДА в файлах/логах
 - Вложения: скачивать в /dev/shm/, удалять после обработки
 - PII: не сохранять полные тексты писем в Baserow (только метаданные + preview)
-- Feedback: хранить sender_email, action, priority — НЕ тело письма
+- Feedback: хранить sender_email, action, priority в SQLite — НЕ тело письма
 
 ## Communication Format
 
@@ -271,13 +296,27 @@ cd /workspace/.claude/skills/email-monitor && PYTHONPATH=. python3 -m services.a
 - Длинные письма: показывать preview + "Показать полностью?"
 - Сообщения > 4000 символов: разбивать на части
 
+## Lessons Learned [CRITICAL]
+
+### LL-1: YouGile = письма от YouGile
+"Проверка YouGile" означает проверку писем ОТ YouGile в Gmail. НЕ логиниться в YouGile. Фильтровать по отправителю (notification@yougile.com или аналог).
+
+### LL-2: Молотова — всегда обращать внимание
+Письма от Молотовой А.В. всегда важные и по делу. Автоматически поднимать приоритет.
+
+### LL-3: Не пропускать письма руководства
+Все письма от руководителей (Модестов и другие VIP) ОБЯЗАТЕЛЬНО выносить в сводку. Owner ловил случаи, когда бот пропускал задачу от Модестова — это критическая ошибка.
+
+### LL-4: БПЛА — стоп-тема
+Письма связанные с БПЛА не показывать (стоп-слово).
+
 ## Integration Points
 
 - **task-control**: создание задач из писем + секция "Работа с почтой" в отчётах
 - **task-control REPORT_GEN**: при генерации отчёта — вызвать `services.analytics report_data`
 - **doc-review**: если письмо содержит .docx → предложить рецензию
 - **schedule-meeting**: если письмо о встрече → предложить создать
-- **Baserow**: email_inbox, email_feedback, sender_profiles (IDs в config.json)
+- **SQLite**: `/data/email_learning.db` — sender_profiles, email_feedback, stop_words
 
 ## Cleanup
 

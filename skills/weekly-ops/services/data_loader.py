@@ -1,4 +1,4 @@
-"""Load tasks and plan items from Baserow for a given period.
+"""Load plan items and task data from SQLite for a given period.
 
 CLI usage:
     python -m services.data_loader pull --period-start 2026-02-17 --period-end 2026-02-21
@@ -10,111 +10,27 @@ from __future__ import annotations
 
 import argparse
 import json
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 
-from config.settings import get_table_id, load_config, output_error, output_json
-from services.baserow import list_all_rows
+from config.settings import load_config, output_error, output_json
+from services.db import get_plan_items, get_active_plan_items, get_all_formulations_as_dict
 
 
 # ---------------------------------------------------------------------------
 # Core loaders
 # ---------------------------------------------------------------------------
 
-def load_tasks(
-    config: dict,
+def load_plan_items_for_period(
     period_start: date,
     period_end: date,
 ) -> list[dict]:
-    """Load all tasks relevant to the period (LL-10: ALL in_progress/assigned)."""
-    table_id = get_table_id(config, "tasks")
-
-    all_tasks = list_all_rows(table_id)
-
-    relevant = []
-    for task in all_tasks:
-        status = (task.get("status") or "").lower()
-
-        # LL-10: always include active tasks
-        if status in ("in_progress", "assigned", "waiting_input"):
-            relevant.append(task)
-            continue
-
-        # Include done/cancelled if within the period
-        if status in ("done", "cancelled", "handed_over"):
-            completed_at = task.get("completed_at") or task.get("updated_on") or ""
-            if completed_at:
-                try:
-                    d = _parse_date(completed_at)
-                    if period_start <= d <= period_end:
-                        relevant.append(task)
-                except (ValueError, TypeError):
-                    pass
-            continue
-
-        # Include tasks with deadline in period
-        deadline = task.get("deadline") or ""
-        if deadline:
-            try:
-                d = _parse_date(deadline)
-                if period_start <= d <= period_end:
-                    relevant.append(task)
-            except (ValueError, TypeError):
-                pass
-
-    return relevant
+    """Load plan items for a specific period from SQLite."""
+    return get_plan_items(str(period_start), str(period_end))
 
 
-def load_plan_items(
-    config: dict,
-    period_start: date,
-    period_end: date,
-) -> list[dict]:
-    """Load plan_items for a specific period from Baserow."""
-    table_id = get_table_id(config, "plan_items")
-
-    # Filter by period_start
-    items = list_all_rows(
-        table_id,
-        filters={"period_start": str(period_start)},
-    )
-
-    # Fallback: if no exact match, search by date range
-    if not items:
-        all_items = list_all_rows(table_id)
-        items = [
-            it for it in all_items
-            if _date_in_range(it.get("period_start", ""), period_start, period_end)
-        ]
-
-    return items
-
-
-def load_regulatory_tracks(
-    config: dict,
-    period_start: date,
-    period_end: date,
-) -> list[dict]:
-    """Load regulatory tracks with deadlines in period."""
-    table_id = get_table_id(config, "regulatory_tracks")
-    all_tracks = list_all_rows(table_id)
-
-    relevant = []
-    for track in all_tracks:
-        dl = track.get("next_deadline") or track.get("deadline") or ""
-        if dl:
-            try:
-                d = _parse_date(dl)
-                if period_start <= d <= period_end:
-                    relevant.append(track)
-            except (ValueError, TypeError):
-                pass
-        # Also include ongoing tracks
-        status = (track.get("status") or "").lower()
-        if status in ("in_progress", "not_started") and track not in relevant:
-            relevant.append(track)
-
-    return relevant
+def load_active_tasks() -> list[dict]:
+    """Load all active plan items (in_progress/planned/carried_over)."""
+    return get_active_plan_items()
 
 
 def load_all_data(
@@ -122,16 +38,13 @@ def load_all_data(
     period_start: date,
     period_end: date,
 ) -> dict:
-    """Load all data needed for plan/report generation (parallel)."""
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        f_tasks = pool.submit(load_tasks, config, period_start, period_end)
-        f_plan = pool.submit(load_plan_items, config, period_start, period_end)
-        f_reg = pool.submit(load_regulatory_tracks, config, period_start, period_end)
+    """Load all data needed for plan/report generation."""
+    plan_items = load_plan_items_for_period(period_start, period_end)
+    active = load_active_tasks()
 
     return {
-        "tasks": f_tasks.result(),
-        "plan_items": f_plan.result(),
-        "regulatory_tracks": f_reg.result(),
+        "plan_items": plan_items,
+        "active_tasks": active,
         "period_start": str(period_start),
         "period_end": str(period_end),
     }
@@ -158,15 +71,6 @@ def _parse_date(value: str) -> date:
             return date(int(parts[2]), int(parts[1]), int(parts[0]))
 
     raise ValueError(f"Cannot parse date: {value}")
-
-
-def _date_in_range(date_str: str, start: date, end: date) -> bool:
-    """Check if date_str falls within [start, end]."""
-    try:
-        d = _parse_date(date_str)
-        return start <= d <= end
-    except (ValueError, TypeError):
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +102,7 @@ def main() -> None:
             output_json(result)
 
         elif args.command == "plan_items":
-            items = load_plan_items(config, start, end)
+            items = load_plan_items_for_period(start, end)
             output_json(items)
 
     except (RuntimeError, ValueError) as e:

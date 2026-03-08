@@ -152,27 +152,16 @@ cd /workspace/.claude/skills/osint && python3 osint_resolver.py status
 
 ### Резолв Sherlock Report
 
+**Персональный бот настроен** — резолвер НЕ нужен. Скрипт идёт напрямую к `@Osijtttttyyghuuijjjiijjbot` (из `config.json`).
+
+Если персональный бот недоступен (fallback):
 ```bash
 cd /workspace/.claude/skills/osint && python3 osint_resolver.py resolve sherlock
 ```
 
-Приоритет:
-1. **Кэш** из `.bot_urls.json` (< 7 дней) + проверка что бот отвечает на /start
-2. **Telegram-канал:** читай посты `@report_sherlok` -> regex `t.me/(\w+)` -> извлечь username бота
-3. **Браузер (fallback):** `browser_navigate("https://dc6.sherlock.report/start")` -> `browser_snapshot()` -> извлечь username из страницы
-
-Если скрипт вернул `"method": "needs_browser"` — выполни браузерный fallback вручную:
-
-```
-mcp__browser__browser_navigate("https://dc6.sherlock.report/start")
-mcp__browser__browser_snapshot()
-```
-
-Извлеки username из скриншота, затем сохрани:
-
-```bash
-cd /workspace/.claude/skills/osint && python3 osint_resolver.py save sherlock "@new_bot_username"
-```
+Приоритет fallback:
+1. **Telegram-канал** `@report_sherlok` → regex `t.me/(\w+)`
+2. **Браузер:** `browser_navigate("https://dc6.sherlock.report/start")` → извлечь username
 
 ### Резолв Cilordbot (telelog)
 
@@ -299,6 +288,8 @@ cd /workspace/.claude/skills/osint && python3 osint_cilord.py detail "messages" 
 ## 7. Sherlock Report — алгоритм
 
 Комплексный OSINT-бот: телефон, ФИО, email, авто, соцсети, документы, адрес, фото и др.
+
+**Персональный бот:** `@Osijtttttyyghuuijjjiijjbot` — создан через "Мои боты" в Sherlock. Не блокируется. Прописан в `config.json` → скрипт идёт к нему напрямую без резолвера.
 
 **Бот принимает текст НАПРЯМУЮ** — без меню и кнопок выбора типа. Кидаешь телефон — ищет по телефону.
 

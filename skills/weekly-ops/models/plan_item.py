@@ -54,7 +54,6 @@ class PlanItem:
     status: PlanItemStatus = PlanItemStatus.PLANNED
     is_unplanned: bool = False
     linked_task_ids: list[int] = field(default_factory=list)
-    baserow_row_id: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -79,33 +78,6 @@ class PlanItem:
             status=status,
             is_unplanned=data.get("is_unplanned", False),
             linked_task_ids=data.get("linked_task_ids", []),
-            baserow_row_id=data.get("baserow_row_id") or data.get("id"),
-        )
-
-    @classmethod
-    def from_baserow(cls, row: dict) -> PlanItem:
-        """Create from Baserow row (user_field_names=true)."""
-        linked = row.get("linked_tasks", "")
-        if isinstance(linked, str) and linked:
-            try:
-                linked_ids = [int(x.strip()) for x in linked.split(",") if x.strip()]
-            except ValueError:
-                linked_ids = []
-        elif isinstance(linked, list):
-            linked_ids = [x.get("id", x) if isinstance(x, dict) else int(x) for x in linked]
-        else:
-            linked_ids = []
-
-        return cls(
-            item_number=row.get("item_number", 0),
-            description=row.get("description", ""),
-            deadline=row.get("deadline", ""),
-            responsible=row.get("responsible", ""),
-            completion_note=row.get("completion_note", ""),
-            status=PlanItemStatus(row.get("status", "planned")),
-            is_unplanned=row.get("is_unplanned", False),
-            linked_task_ids=linked_ids,
-            baserow_row_id=row.get("id"),
         )
 
 

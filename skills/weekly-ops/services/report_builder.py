@@ -43,7 +43,7 @@ def build_report(
     warnings: list[str] = []
 
     # Build PlanItem objects
-    plan_items = [PlanItem.from_baserow(pi) for pi in plan_items_raw]
+    plan_items = [PlanItem.from_dict(pi) for pi in plan_items_raw]
 
     # Build report items for planned activities
     planned_reports: list[ReportItem] = []

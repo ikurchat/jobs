@@ -1,10 +1,12 @@
 """
 Whitelist — реестр получателей исходящих сообщений.
 
-Все инструменты отправки (tg_send_message, send_to_user, create_task)
-доступны только owner-сессиям, поэтому whitelist работает как реестр,
-а не блокировщик: при первом контакте автоматически добавляет получателя
-в список и логирует.
+Бот может отправлять DM только:
+- Owner'у
+- Пользователям в whitelist (добавляются через whitelist_user tool)
+- Каналам/группам
+
+Попытка отправить не-whitelisted пользователю блокируется.
 """
 
 from loguru import logger
@@ -14,21 +16,9 @@ from src.config import settings
 from src.users.repository import get_users_repository
 
 
-async def _auto_whitelist(user_id: int, username: str | None = None) -> None:
-    """Автоматически добавляет пользователя в whitelist при первом контакте."""
-    repo = get_users_repository()
-    user = await repo.get_user(user_id)
-    if user is None:
-        await repo.upsert_user(telegram_id=user_id, username=username)
-    if not (user and user.is_whitelisted):
-        await repo.whitelist_user(user_id)
-        tag = f" (@{username})" if username else ""
-        logger.info(f"Auto-whitelisted user_id={user_id}{tag} on first outgoing contact")
-
-
 async def validate_recipient(entity) -> tuple[bool, str]:
     """
-    Валидирует получателя. Автоматически добавляет в whitelist при первом контакте.
+    Валидирует получателя. НЕ whitelisted пользователи блокируются.
 
     Returns:
         (allowed, reason)
@@ -41,18 +31,20 @@ async def validate_recipient(entity) -> tuple[bool, str]:
 
     if isinstance(entity, User):
         repo = get_users_repository()
-        if not await repo.is_user_whitelisted(entity.id):
-            await _auto_whitelist(entity.id, entity.username)
-        return True, "whitelisted"
+        if await repo.is_user_whitelisted(entity.id):
+            return True, "whitelisted"
+        tag = f" (@{entity.username})" if entity.username else ""
+        logger.warning(f"BLOCKED outgoing to user_id={entity.id}{tag}: not in whitelist")
+        return False, f"User {entity.id}{tag} not in whitelist. Use whitelist_user() first."
 
     entity_id = getattr(entity, "id", "unknown")
     logger.warning(f"Unknown entity type: {type(entity).__name__} (id={entity_id})")
-    return True, f"unknown entity type (allowed): {type(entity).__name__}"
+    return False, f"Unknown entity type: {type(entity).__name__}"
 
 
 async def validate_recipient_by_id(user_id: int) -> tuple[bool, str]:
     """
-    Валидирует по user_id. Автоматически добавляет в whitelist при первом контакте.
+    Валидирует по user_id. НЕ whitelisted пользователи блокируются.
 
     Returns:
         (allowed, reason)
@@ -61,7 +53,8 @@ async def validate_recipient_by_id(user_id: int) -> tuple[bool, str]:
         return True, "owner"
 
     repo = get_users_repository()
-    if not await repo.is_user_whitelisted(user_id):
-        await _auto_whitelist(user_id)
+    if await repo.is_user_whitelisted(user_id):
+        return True, "whitelisted"
 
-    return True, "whitelisted"
+    logger.warning(f"BLOCKED outgoing to user_id={user_id}: not in whitelist")
+    return False, f"User {user_id} not in whitelist. Use whitelist_user() first."

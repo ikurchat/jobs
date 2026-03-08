@@ -177,6 +177,43 @@ class StatusTracker:
         return text, entities
 
 
+class _ApiDownTracker:
+    """Трекер состояния API — подавляет повторные ошибки в чат."""
+
+    def __init__(self) -> None:
+        self._down_since: float | None = None  # monotonic timestamp
+        self._notified: bool = False  # уже сообщили owner'у
+
+    @property
+    def is_down(self) -> bool:
+        return self._down_since is not None
+
+    def mark_down(self) -> bool:
+        """Отмечает API как недоступный. Возвращает True если это ПЕРВАЯ ошибка."""
+        if self._down_since is None:
+            self._down_since = time.monotonic()
+            self._notified = False
+            return True
+        return False
+
+    def mark_up(self) -> int | None:
+        """Отмечает API как восстановленный. Возвращает минуты простоя или None."""
+        if self._down_since is None:
+            return None
+        elapsed = time.monotonic() - self._down_since
+        self._down_since = None
+        self._notified = False
+        minutes = int(elapsed / 60)
+        return max(minutes, 1)  # минимум 1 минута
+
+    @property
+    def already_notified(self) -> bool:
+        return self._notified
+
+    def set_notified(self) -> None:
+        self._notified = True
+
+
 class TelegramHandlers:
     """Обработчики сообщений Telegram."""
 
@@ -185,6 +222,7 @@ class TelegramHandlers:
         self._is_premium: dict[TransportMode, bool] = {}
         self._updater = Updater()
         self._reply_targets: dict[str, IncomingMessage] = {}  # session_key → latest msg (для follow-up)
+        self._api_down = _ApiDownTracker()
 
         # Настраиваем sender'ы для user tools
         set_telegram_sender(self._send_message)
@@ -399,6 +437,10 @@ class TelegramHandlers:
             set_owner_info(user_id, msg.sender_first_name, msg.sender_username, msg.sender_phone)
         else:
             repo = get_users_repository()
+            # Проверяем: новый пользователь? → уведомить owner'а
+            existing = await repo.get_user(user_id)
+            is_new_contact = existing is None
+
             await repo.upsert_user(
                 telegram_id=user_id,
                 username=msg.sender_username,
@@ -409,6 +451,19 @@ class TelegramHandlers:
             if await repo.is_user_banned(user_id):
                 logger.info(f"[{user_id}] Banned user, ignoring")
                 return
+
+            # Уведомляем owner'а о новом контакте
+            if is_new_contact:
+                name = msg.sender_first_name or ""
+                if msg.sender_last_name:
+                    name += f" {msg.sender_last_name}"
+                tag = f" @{msg.sender_username}" if msg.sender_username else ""
+                preview = (msg.text or "[медиа]")[:100]
+                notify = f"Новый контакт: {name.strip()}{tag} (id:{user_id})\nСообщение: {preview}"
+                try:
+                    await self._primary.send_message(settings.primary_owner_id, notify)
+                except Exception as e:
+                    logger.error(f"Failed to notify owner about new contact: {e}")
 
         # Добавляем время и оборачиваем в системные теги
         now = datetime.now(tz=settings.get_timezone())
@@ -436,7 +491,14 @@ class TelegramHandlers:
         status = StatusTracker(transport, msg, await self._check_premium(transport))
 
         try:
+            first_chunk = True
             async for text, tool_name, is_final in session.query_stream(prompt):
+                # API восстановился — уведомляем owner'а
+                if first_chunk and self._api_down.is_down:
+                    downtime = self._api_down.mark_up()
+                    if downtime and is_owner:
+                        await transport.reply(msg, f"Извини, был недоступен ~{downtime} мин. На месте.")
+                first_chunk = False
                 # Перепривязка к новому сообщению при follow-up
                 new_msg = self._reply_targets.pop(session_key, None)
                 if new_msg:
@@ -465,7 +527,12 @@ class TelegramHandlers:
             from src.api import log_error
             log_error("api_error", str(e), f"user:{user_id}")
             await status.delete()
-            await transport.reply(msg, "Произошла ошибка. Детали в панели управления.")
+
+            # Подавляем повторные ошибки — одно сообщение при первом сбое, дальше молчим
+            is_first = self._api_down.mark_down()
+            if is_first:
+                await transport.reply(msg, "Бот временно недоступен. Напишу когда вернусь.")
+                self._api_down.set_notified()
 
         finally:
             await typing.stop()

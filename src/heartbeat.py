@@ -60,6 +60,7 @@ class HeartbeatRunner:
         self._interval = interval_minutes * 60  # в секунды
         self._running = False
         self._task: asyncio.Task | None = None
+        self._last_reminder: dict[str, datetime] = {}  # rate limiting: "reminder:{user_id}" → last sent
 
     async def start(self) -> None:
         """Запускает heartbeat loop."""
@@ -182,7 +183,10 @@ class HeartbeatRunner:
         return None
 
     async def _check_user_tasks(self) -> None:
-        """Проверяет просроченные задачи и напоминает пользователям."""
+        """Проверяет просроченные задачи и напоминает ТОЛЬКО whitelisted пользователям.
+
+        Rate limiting: max 1 напоминание на пользователя в 24 часа.
+        """
         from src.users import get_users_repository
 
         repo = get_users_repository()
@@ -203,11 +207,24 @@ class HeartbeatRunner:
                 by_user[task.assignee_id] = []
             by_user[task.assignee_id].append(task)
 
-        # Отправляем напоминания пользователям
+        # Отправляем напоминания ТОЛЬКО whitelisted пользователям
         for user_id, tasks in by_user.items():
             # Не напоминаем owner'у через этот механизм
             if settings.is_owner(user_id):
                 continue
+
+            # Проверяем whitelist — не whitelisted → не пишем
+            if not await repo.is_user_whitelisted(user_id):
+                logger.debug(f"Skipping reminder for {user_id}: not whitelisted")
+                continue
+
+            # Rate limiting: max 1 раз в 24 часа
+            last_key = f"reminder:{user_id}"
+            if last_key in self._last_reminder:
+                elapsed = datetime.now().astimezone() - self._last_reminder[last_key]
+                if elapsed.total_seconds() < 86400:  # 24 часа
+                    logger.debug(f"Skipping reminder for {user_id}: sent {elapsed.total_seconds() / 3600:.1f}h ago")
+                    continue
 
             user = await repo.get_user(user_id)
             user_name = user.display_name if user else str(user_id)
@@ -224,7 +241,10 @@ class HeartbeatRunner:
 
             try:
                 await self._transport.send_message(user_id, reminder)
+                self._last_reminder[last_key] = datetime.now().astimezone()
                 logger.info(f"Sent reminder to {user_name}: {len(tasks)} overdue tasks")
+                # Пауза между сообщениями для Telegram flood control
+                await asyncio.sleep(1)
             except Exception as e:
                 logger.error(f"Failed to send reminder to {user_name}: {e}")
 

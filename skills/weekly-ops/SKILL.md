@@ -8,7 +8,9 @@ description: >
   "отчёт за месяц", "агрегируй отчёты", "заполни план", "plan", "report",
   "weekly plan", "weekly report", "monthly plan", "monthly report",
   "сформируй план", "сформируй отчёт", "план на следующую неделю",
-  "отчёт за прошлую неделю"
+  "отчёт за прошлую неделю", "черновик отчёта", "черновик плана",
+  "подготовь черновик", "draft report", "draft plan", "auto draft",
+  "настрой автодрафт", "вопросы по плану"
 tools:
   - Bash
   - Read
@@ -23,7 +25,7 @@ tools:
 
 # weekly-ops — Планы и отчёты
 
-Единая точка для еженедельных/ежемесячных планов и отчётов. Подтягивает данные из Baserow, предзаполняет формулировки из памяти, согласовывает блоками, генерит .docx.
+Единая точка для еженедельных/ежемесячных планов и отчётов. Подтягивает данные из БД (локальный SQLite), предзаполняет формулировки из памяти, согласовывает блоками, генерит .docx.
 
 ## Определение режима
 
@@ -33,6 +35,9 @@ tools:
 | "план на месяц", "ежемесячный план" | PLAN_MONTHLY |
 | "отчёт за неделю", "заполни отчёт", "report" | REPORT_WEEKLY |
 | "отчёт за месяц", "месячный отчёт" | REPORT_MONTHLY |
+| "черновик отчёта", "draft report" | AUTO_DRAFT_REPORT |
+| "черновик плана", "draft plan" | AUTO_DRAFT_PLAN |
+| "вопросы по плану", "что уточнить" | QUESTIONS |
 | .docx прикреплён + контекст плана/отчёта | TEMPLATE_FILL |
 
 ## State Tracking
@@ -108,7 +113,7 @@ print(wd)
 "
 ```
 
-**1.3.** Загрузи данные из Baserow:
+**1.3.** Загрузи данные из БД:
 ```bash
 cd /workspace/.claude/skills/weekly-ops && PYTHONPATH=. python3 -m services.data_loader pull --period-start YYYY-MM-DD --period-end YYYY-MM-DD
 ```
@@ -149,9 +154,17 @@ cd /workspace/.claude/skills/weekly-ops && PYTHONPATH=. python3 -m services.docx
 
 **1.11.** Отправить .docx owner'у через `mcp__jobs__tg_send_media`.
 
-**1.12.** Сохранить plan_items в Baserow:
+**1.12.** Сохранить plan_items и версию плана в БД:
 ```bash
-cd /workspace/.claude/skills/weekly-ops && PYTHONPATH=. python3 -m services.baserow batch_create TABLE_ID --data '[...]'
+cd /workspace/.claude/skills/weekly-ops && PYTHONPATH=. python3 -c "
+from services.db import save_plan_items, save_plan_version
+import json
+with open('{work_dir}/plan_final.json') as f:
+    items = json.load(f)
+save_plan_items(items, 'YYYY-MM-DD', 'YYYY-MM-DD', 'weekly')
+v = save_plan_version('YYYY-MM-DD', 'YYYY-MM-DD', 'weekly', items, 'approved', '{work_dir}/plan.docx')
+print(f'Saved {len(items)} items, version {v}')
+"
 ```
 
 **1.13.** Если owner просит — опубликовать в Pi Space.
@@ -212,15 +225,16 @@ cd /workspace/.claude/skills/weekly-ops && PYTHONPATH=. python3 -m services.prev
 - "② 80%, акт подписан" → правка отметки
 - "всё ок" → approve все
 
-**3.10.** После approve — СОХРАНИТЬ утверждённые формулировки в memory:
+**3.10.** После approve — СОХРАНИТЬ утверждённые формулировки и версию отчёта в БД:
 ```bash
 cd /workspace/.claude/skills/weekly-ops && PYTHONPATH=. python3 -c "
 import json
-from services.formulation_memory import bulk_save_approved
+from services.db import bulk_save_formulations, save_report_version
 with open('{work_dir}/approved_items.json') as f:
     items = json.load(f)
-saved = bulk_save_approved(items)
-print(f'Saved {saved} formulations')
+saved = bulk_save_formulations(items)
+v = save_report_version('YYYY-MM-DD', 'YYYY-MM-DD', 'weekly', items, 'approved', '{work_dir}/report.docx')
+print(f'Saved {saved} formulations, report version {v}')
 "
 ```
 
@@ -236,7 +250,7 @@ cd /workspace/.claude/skills/weekly-ops && PYTHONPATH=. python3 -m services.docx
 cd /workspace/.claude/skills/weekly-ops && PYTHONPATH=. python3 -m services.docx_generator report --data {work_dir}/report_final.json --output {work_dir}/report.docx
 ```
 
-**3.12.** Обновить plan_items.completion_note в Baserow.
+**3.12.** Обновить plan_items.completion_note в БД.
 
 **3.13.** Отправить + опубликовать + очистка.
 
@@ -340,11 +354,213 @@ cd /workspace/.claude/skills/weekly-ops && PYTHONPATH=. python3 -m services.docx
 
 ## Формулировочная память
 
-После **explicit approve** блока owner'ом — сохранить утверждённые формулировки.
+Хранится в SQLite (`/data/weekly_ops.db`, таблица `formulation_memory`).
 
-При построении следующего отчёта — сначала искать в памяти по keyword overlap (≥ 60%).
+После **explicit approve** блока owner'ом — сохранить утверждённые формулировки через `db.bulk_save_formulations()`.
+
+При построении следующего отчёта — сначала искать в памяти по keyword overlap (≥ 60%) через `db.search_formulation()`.
 Если найдено — подставить паттерн + заполнить переменные из задач.
 Если нет — сгенерировать автоматически из task.status + task.result.
+
+---
+
+## Версионирование и обратная связь
+
+### Хранение версий
+Каждый план и отчёт сохраняется как версия в SQLite:
+- `plan_versions` — draft → approved → final (с путём к .docx)
+- `report_versions` — draft → approved → final
+
+При получении плана/отчёта — ВСЕГДА сохранять версию через `db.save_plan_version()` / `db.save_report_version()`.
+
+### Обратная связь owner'а
+КАЖДУЮ правку owner'а логировать через `db.log_feedback()`:
+
+| Действие owner'а | action | Что записать |
+|---|---|---|
+| "② сроки до пятницы" | `edit` | old_text=старый текст, new_text=новый |
+| "⑤ убрать" | `delete` | old_text=удалённый пункт |
+| "добавь: ..." | `add` | new_text=добавленный пункт |
+| "ок" / "да" | `approve_block` | item_number=номер блока |
+| "всё ок" | `approve_all` | — |
+
+```bash
+cd /workspace/.claude/skills/weekly-ops && PYTHONPATH=. python3 -c "
+from services.db import log_feedback
+log_feedback('YYYY-MM-DD', 'YYYY-MM-DD', 'plan', 'edit', item_number=2, old_text='...', new_text='...')
+"
+```
+
+### Использование обратной связи
+При построении СЛЕДУЮЩЕГО плана/отчёта:
+1. Загрузить feedback за предыдущие периоды через `db.get_feedback_stats()`
+2. Если owner часто удаляет определённые типы пунктов — не предлагать их
+3. Если owner часто правит формулировки — использовать утверждённые из `formulation_memory`
+
+### Получение предыдущего плана
+Бот ВСЕГДА может найти предыдущий план:
+```bash
+cd /workspace/.claude/skills/weekly-ops && PYTHONPATH=. python3 -c "
+from services.db import get_latest_plan_version
+v = get_latest_plan_version('YYYY-MM-DD', 'YYYY-MM-DD')
+if v: print(f'Version {v[\"version\"]}, status={v[\"status\"]}, items={len(v[\"items\"])}')
+else: print('No plan found')
+"
+```
+
+---
+
+## 6. AUTO_DRAFT — Автоматическая подготовка черновиков
+
+### 6.1. Авто-черновик отчёта (пятница)
+
+Бот может автоматически подготовить черновик отчёта на основе утверждённого плана.
+
+**Когда запускать:**
+- Пятница утро (по расписанию через `schedule_task`)
+- Или по запросу owner'а: "подготовь черновик отчёта", "draft report"
+
+**Алгоритм:**
+1. Загрузить план текущей недели из БД
+2. Для каждого пункта — поискать в формулировочной памяти
+3. Пункты без ясного статуса → пометить `[Требуется уточнение]`
+4. Сформировать вопросы по неясным пунктам
+5. Сохранить черновик как draft-версию отчёта
+6. Отправить owner'у вопросы + preview черновика
+
+```bash
+cd /workspace/.claude/skills/weekly-ops && PYTHONPATH=. python3 -m services.auto_draft report --period-start YYYY-MM-DD --period-end YYYY-MM-DD
+```
+
+**Результат:** JSON с полями `items`, `questions`, `version`, `needs_input`.
+
+### 6.2. Авто-черновик плана (после отчёта / понедельник)
+
+Бот может автоматически подготовить черновик плана на следующую неделю.
+
+**Когда запускать:**
+- После утверждения отчёта за текущую неделю
+- Или понедельник утро (по расписанию)
+- Или по запросу: "подготовь черновик плана", "draft plan"
+
+**Алгоритм:**
+1. Загрузить отчёт за прошлую неделю → определить невыполненные пункты
+2. Carry-over незавершённых пунктов
+3. Добавить обязательные пункты (mandatory_items)
+4. Проверить активные задачи (in_progress) — добавить если нет в плане
+5. Учесть feedback: если owner часто удаляет определённые пункты — не предлагать
+6. Сохранить черновик как draft-версию плана
+
+```bash
+cd /workspace/.claude/skills/weekly-ops && PYTHONPATH=. python3 -m services.auto_draft plan --period-start YYYY-MM-DD --period-end YYYY-MM-DD
+```
+
+**Результат:** JSON с полями `items`, `version`, `carried_over`, `mandatory`.
+
+### 6.3. Интеграция auto-draft в основной flow
+
+При вызове PLAN_WEEKLY или REPORT_WEEKLY:
+
+1. **Сначала** проверить — есть ли уже draft-версия в БД?
+2. Если есть → загрузить и использовать как основу (не строить с нуля)
+3. Если нет → построить стандартным способом (шаги 1.3-1.5 / 3.3-3.5)
+
+```bash
+cd /workspace/.claude/skills/weekly-ops && PYTHONPATH=. python3 -c "
+from services.db import get_latest_plan_version
+v = get_latest_plan_version('YYYY-MM-DD', 'YYYY-MM-DD')
+if v and v['status'] == 'draft':
+    print(f'Draft v{v[\"version\"]} found, {len(v[\"items\"])} items')
+else:
+    print('No draft, build from scratch')
+"
+```
+
+---
+
+## 7. QUESTIONS — Модуль уточняющих вопросов
+
+### 7.1. Назначение
+
+Перед финализацией отчёта бот анализирует пункты плана и задаёт конкретные вопросы owner'у по тем пунктам, где статус неясен. Это повышает качество черновика отчёта.
+
+### 7.2. Генерация вопросов
+
+```bash
+cd /workspace/.claude/skills/weekly-ops && PYTHONPATH=. python3 -m services.auto_draft questions --period-start YYYY-MM-DD --period-end YYYY-MM-DD --format message
+```
+
+**Типы вопросов (определяются автоматически по ключевым словам):**
+
+| Тип пункта | Вопрос |
+|------------|--------|
+| мониторинг, контроль | Сколько событий/инцидентов? Ключевые выводы? |
+| согласование, утверждение | Документ согласован/подписан? На каком этапе? |
+| разработка, подготовка | Готово? Если в работе — какой процент? |
+| проверка, аудит | Проверка завершена? Какие результаты? |
+| совещание, встреча | Состоялось? Ключевые решения? |
+| общий | Выполнено / в работе / перенесено? |
+
+### 7.3. Формат вопросов owner'у
+
+```
+📋 Для подготовки отчёта уточни по следующим пунктам:
+
+❓ п.1: «Мониторинг событий ИБ» — сколько событий/инцидентов? Ключевые выводы?
+❓ п.3: «Согласование Порядка мониторинга ИБ» — документ согласован/подписан? На каком этапе?
+❓ п.5: «Подготовка справки по ГосСОПКА» — готово? Если в работе — какой процент?
+
+Отвечай в формате: «п.2 — выполнено, акт подписан»
+```
+
+### 7.4. Парсинг ответов на вопросы
+
+Owner отвечает в свободной форме:
+- "п.1 — 312 событий, 2 инцидента" → обновить completion_note пункта 1
+- "п.3 — в работе 60%, промежуточный акт направлен" → обновить пункт 3
+- "п.5 — выполнено, справка утверждена рег.42-ИБ" → обновить пункт 5, статус=done
+
+После получения ответов — обновить черновик отчёта и показать preview.
+
+### 7.5. Flow: вопросы → черновик → согласование
+
+```
+Пятница утро:
+  1. auto_draft report → черновик + вопросы
+  2. Отправить вопросы owner'у
+  3. Owner отвечает
+  4. Обновить черновик по ответам
+  5. Показать preview блоками → стандартный цикл согласования
+  6. После approve → docx → отправить
+```
+
+---
+
+## 8. Расписание (schedule_task)
+
+Для автоматизации отчётно-плановой деятельности создать scheduled tasks:
+
+### Пятница 09:00 — черновик отчёта
+```
+schedule_task(
+  title="Черновик отчёта за неделю",
+  prompt="Подготовь черновик отчёта за текущую неделю. Используй /weekly-ops auto-draft report.",
+  time="09:00",
+  repeat="7d"
+)
+```
+
+### Понедельник 09:00 — черновик плана
+```
+schedule_task(
+  title="Черновик плана на неделю",
+  prompt="Подготовь черновик плана на текущую неделю. Используй /weekly-ops auto-draft plan.",
+  time="09:00",
+  repeat="7d"
+)
+```
+
+Бот НЕ создаёт расписание автоматически — только по запросу owner'а ("настрой автодрафт", "включи автоматику").
 
 ---
 

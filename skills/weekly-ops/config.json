@@ -1,13 +1,5 @@
 {
-  "baserow": {
-    "tables": {
-      "employees": 833857,
-      "tasks": 833859,
-      "plan_items": 833860,
-      "regulatory_tracks": 833861,
-      "formulation_memory": 851056
-    }
-  },
+  "db_path": "/data/weekly_ops.db",
 
   "rules": {
     "mandatory_items": [

@@ -1,4 +1,4 @@
-"""Build plan from raw Baserow data + business rules.
+"""Build plan from raw data + business rules.
 
 CLI usage:
     python -m services.plan_builder build --data /dev/shm/weekly-ops/raw.json --output /dev/shm/weekly-ops/plan.json
@@ -35,7 +35,7 @@ def build_plan(
     period_type: PeriodType = PeriodType.WEEKLY,
     config: dict | None = None,
 ) -> list[PlanItem]:
-    """Build plan items from raw Baserow data applying all rules."""
+    """Build plan items from raw data applying all rules."""
     cfg = config or load_config()
     tasks = raw_data.get("tasks", [])
     existing_plan_items = raw_data.get("plan_items", [])
@@ -47,7 +47,7 @@ def build_plan(
     for pi_data in existing_plan_items:
         status = (pi_data.get("status") or "planned").lower()
         if status in ("in_progress", "carried_over", "planned"):
-            item = PlanItem.from_baserow(pi_data)
+            item = PlanItem.from_dict(pi_data)
             item.status = PlanItemStatus.PLANNED
             if not is_excluded(item.description):
                 items.append(item)

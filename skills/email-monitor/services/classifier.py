@@ -1,9 +1,9 @@
 """Классификатор писем: приоритет, категория, предлагаемое действие.
 
-Использует правила из config.json + custom_rules.json + feedback из Baserow.
+Использует правила из config.json + custom_rules.json + feedback из SQLite.
 
 CLI: python -m services.classifier classify --email email.json
-     python -m services.classifier batch --emails emails.json
+     python -m services.classifier batch --emails emails.json [--feedback feedback.json]
 """
 
 import argparse
@@ -243,8 +243,20 @@ def _build_reasons(is_vip: bool, vip_data: dict | None,
 
 
 def classify_batch(emails: list[dict], feedback_history: list | None = None) -> list[dict]:
+    # Загружаем стоп-слова для фильтрации
+    try:
+        from services.feedback import get_stop_words
+        stop_words = get_stop_words()
+    except Exception:
+        stop_words = []
+
     results = []
     for em in emails:
+        # Фильтрация по стоп-словам
+        if stop_words:
+            text = f"{em.get('subject', '')} {em.get('body_preview', '')}".lower()
+            if any(sw in text for sw in stop_words):
+                continue  # Пропускаем письмо
         cls = classify_email(em, feedback_history)
         em.update(cls)
         results.append(em)

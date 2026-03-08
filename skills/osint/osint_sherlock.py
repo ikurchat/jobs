@@ -41,8 +41,34 @@ RETRY_TIMEOUTS = [60, 90, 120]
 RATE_LIMIT_PAUSE = 30
 
 
+def _load_osint_config() -> dict:
+    """Load osint config.json."""
+    cfg_path = Path(__file__).parent / "config.json"
+    if cfg_path.exists():
+        return json.loads(cfg_path.read_text(encoding="utf-8"))
+    return {}
+
+
 async def _get_bot_entity(client):
-    """Resolve and return the Sherlock bot entity."""
+    """Resolve and return the Sherlock bot entity.
+
+    If personal_bot is configured — use it directly (no resolver).
+    Otherwise fall back to resolver chain.
+    """
+    cfg = _load_osint_config().get("sherlock", {})
+    personal_bot = cfg.get("personal_bot")
+
+    if personal_bot and not cfg.get("use_resolver", True):
+        # Direct access to personal bot — no blocking, no resolver needed
+        try:
+            entity = await client.get_entity(personal_bot)
+            if getattr(entity, "bot", False):
+                return entity, {"username": personal_bot, "method": "personal_bot", "valid": True}
+        except Exception:
+            pass
+        # Fallback to resolver if personal bot unreachable
+        print(f"[sherlock] Personal bot {personal_bot} unreachable, falling back to resolver", file=sys.stderr)
+
     result = await resolve_sherlock(client)
     if not result.get("valid"):
         return None, result
