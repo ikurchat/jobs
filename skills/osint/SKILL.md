@@ -170,10 +170,19 @@ cd /workspace/.claude/skills/osint && python3 osint_resolver.py resolve cilord
 ```
 
 Приоритет:
-1. **Кэш** из `.bot_urls.json` (< 7 дней) + проверка
-2. **Браузер:** `browser_navigate("http://bit.ly/4kIt4t9")` -> редирект на telelog.org -> `browser_snapshot()` -> извлечь `t.me/...` ссылку на бота
+1. **Personal bot** из config.json (`@UseVVwBOT`) — проверка через Telegram
+2. **Кэш** из `.bot_urls.json` (< 7 дней) + проверка
+3. **HTTP-скрейпинг** — автоматически ходит на source_urls (`bit.ly/4kIt4t9` → `telelog.org`), парсит `t.me/` ссылку на бота, валидирует через Telegram
+4. **Fallback-канал** (если настроен в config)
+5. **Браузер** (last resort) — если HTTP не помог
 
-Если скрипт вернул `"method": "needs_browser"`:
+**При блокировке бота:**
+- Скрипт автоматически пробует все уровни fallback
+- Сайт telelog.org всегда содержит актуальную ссылку на бота
+- Найденный username сохраняется в кэш автоматически
+- Если HTTP-резолв нашёл username но Telegram-валидация не прошла — возвращает warning
+
+Если скрипт вернул `"method": "needs_browser"` (все автоматические методы не сработали):
 
 ```
 mcp__browser__browser_navigate("http://bit.ly/4kIt4t9")
@@ -199,6 +208,8 @@ cd /workspace/.claude/skills/osint && python3 osint_resolver.py validate "@bot_u
 ## 6. Cilordbot (telelog) — алгоритм
 
 Бот для Telegram-OSINT: username, ID, телефон -> группы, каналы, сообщения.
+
+**Текущий бот:** `@UseVVwBOT` — прописан в `config.json`. При блокировке resolver автоматически найдёт новый через сайт telelog.org.
 
 ### Шаг 6.1 — Кэш
 
@@ -279,7 +290,7 @@ cd /workspace/.claude/skills/osint && python3 osint_cilord.py detail "messages" 
 |---|---|
 | Бот не ответил 30 сек | Скрипт retry x2 автоматически |
 | Капча изменилась (нет кнопки) | Уведомить создателя, показать текст ответа |
-| Бот забанен / не существует | Запустить резолвер через браузер, повторить |
+| Бот забанен / не существует | Резолвер автоматически пробует HTTP-скрейпинг telelog.org → новый бот → retry. Если HTTP не помог → браузер |
 | `"error": "button_not_found"` | Показать `available_buttons` создателю |
 | `"error": "no_balance"` | Уведомить создателя, предложить Sherlock |
 

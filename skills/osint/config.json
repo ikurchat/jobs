@@ -6,9 +6,13 @@
     "default_country": "RU"
   },
   "cilord": {
-    "personal_bot": null,
+    "personal_bot": "@UseVVwBOT",
     "use_resolver": true,
-    "bitly_url": "http://bit.ly/4kIt4t9"
+    "source_urls": [
+      "http://bit.ly/4kIt4t9",
+      "https://telelog.org"
+    ],
+    "fallback_channel": null
   },
   "cache_dir": "/workspace/osint",
   "cache_max_age_hours": 24,

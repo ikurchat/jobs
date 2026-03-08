@@ -41,7 +41,11 @@ RETRY_PAUSE = 10
 
 
 async def _get_bot_entity(client):
-    """Resolve and return the Cilord bot entity."""
+    """Resolve and return the Cilord bot entity.
+
+    Priority: personal_bot from config → resolver (cache → HTTP → browser).
+    If personal bot is blocked, falls through to resolver automatically.
+    """
     result = await resolve_cilord(client)
     if not result.get("valid"):
         return None, result
