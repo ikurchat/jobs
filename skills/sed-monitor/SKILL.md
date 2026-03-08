@@ -6,7 +6,7 @@ description: >
   "статус СЭД", "синхронизация СЭД", "обнови пароль СЭД",
   "что мне расписали", "непросмотренные документы", "поиск в СЭД",
   "скачай документ", "пришли документ", "дай PDF",
-  link contains "doc.rscc.ru".
+  link contains "doc.rscc.ru", link contains "sd-praktika.ru".
 tools: Read, Bash, Grep, Glob
 ---
 
@@ -75,9 +75,10 @@ from services.monitor import sync_single_document
 result = sync_single_document(doc_id)
 ```
 
-Parse doc.rscc.ru links:
+Parse links:
 - `https://doc.rscc.ru:444/web/document/view?id=883493` → doc_id=883493
-- Extract `id` parameter
+- `https://app.sd-praktika.ru/?id=875962` → doc_id=875962
+- Extract `id` query parameter from any of these domains
 
 ## 5. DOCUMENT — Детали документа
 
