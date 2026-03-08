@@ -15,137 +15,76 @@ tools: Read, Bash, Grep, Glob
 Мониторинг корпоративной СЭД (doc.rscc.ru). Только чтение — никаких управляющих воздействий.
 Работаем нежно: рандомные задержки, минимум запросов, не отсвечиваем.
 
-## Architecture
+## CLI — как вызывать
 
-```
-jobs container ──HTTP──▶ sed-proxy ──GOST TLS──▶ doc.rscc.ru:444
-                         (sidecar)                (СЭД Практика)
-```
+Все команды через cli.py (рабочая директория: `/workspace/.claude/skills/sed-monitor/`):
 
-- `sed-proxy`: sidecar container с GOST OpenSSL, принимает plain HTTP, шлёт GOST TLS
-- Аутентификация: DNSID + auth_token cookies, клиентский ГОСТ-сертификат
-- Данные: SQLite (`/data/sed_monitor.db`)
-
-## 1. STATUS — Статус системы
-
-**Trigger:** "статус СЭД", "СЭД работает?"
-
-```python
-from services.monitor import check_status
-status = check_status()
-# Показать: connectivity (proxy/sed/auth), stats, last_sync
+```bash
+SED_DIR=/workspace/.claude/skills/sed-monitor
+python3 $SED_DIR/cli.py <command> [args]
 ```
 
-## 2. SYNC — Синхронизация
+| Команда | Описание |
+|---------|----------|
+| `python3 $SED_DIR/cli.py status` | Статус: connectivity + DB stats + last sync |
+| `python3 $SED_DIR/cli.py connectivity` | Проверить связь с proxy/SED/auth |
+| `python3 $SED_DIR/cli.py sync` | Полная синхронизация всех папок |
+| `python3 $SED_DIR/cli.py document <doc_id>` | Полная инфо по документу (fetch если нет в БД) |
+| `python3 $SED_DIR/cli.py search <query>` | Поиск по номеру/тексту в СЭД |
+| `python3 $SED_DIR/cli.py resolutions [assignee]` | Мои резолюции (default: Панков) |
+| `python3 $SED_DIR/cli.py unviewed` | Непросмотренные документы |
+| `python3 $SED_DIR/cli.py download <doc_id>` | Скачать документ как PDF |
+| `python3 $SED_DIR/cli.py text <doc_id>` | OCR-текст документа |
+| `python3 $SED_DIR/cli.py stats` | Статистика БД |
 
-**Trigger:** "проверь СЭД", "что нового в СЭД", "синхронизация"
+Все команды выводят JSON (кроме text и download).
 
-```python
-from services.monitor import run_sync
-result = run_sync(sync_type="manual")
-# Показать: new_documents, new_resolutions, errors
-```
+## Парсинг ссылок
 
-## 3. MY_RESOLUTIONS — Мои резолюции
+Из ссылок извлекай `id` и передавай в `document`:
+- `https://doc.rscc.ru:444/web/document/view?id=883493` → `python3 $SED_DIR/cli.py document 883493`
+- `https://app.sd-praktika.ru/?id=875962` → `python3 $SED_DIR/cli.py document 875962`
 
-**Trigger:** "что мне расписали", "мои резолюции", "мои документы"
+## Обновление пароля
 
-```python
-from services.monitor import get_my_summary
-summary = get_my_summary("Панков")
-# Показать: resolutions с deadline, unviewed docs, stats
-```
+**Trigger:** "обнови пароль СЭД"
 
-Format response:
-- Group by status (active/completed)
-- Show deadline, author, document number
-- Highlight overdue items
-
-## 4. SEARCH — Поиск документа
-
-**Trigger:** "найди документ N", "документ номер X", link to doc.rscc.ru
-
-```python
-# By number or keyword:
-from services.monitor import search_and_fetch
-docs = search_and_fetch("123-456")
-
-# By doc_id (from link):
-from services.monitor import sync_single_document
-result = sync_single_document(doc_id)
-```
-
-Parse links:
-- `https://doc.rscc.ru:444/web/document/view?id=883493` → doc_id=883493
-- `https://app.sd-praktika.ru/?id=875962` → doc_id=875962
-- Extract `id` query parameter from any of these domains
-
-## 5. DOCUMENT — Детали документа
-
-**Trigger:** "покажи документ", "карточка документа", "текст документа"
-
-```python
-from services.monitor import get_document_summary
-info = get_document_summary(doc_id)
-# info: document, resolutions, card, text (OCR), full_text_length
-```
-
-Show:
-- Number, date, short content
-- Resolutions (who → whom, text, deadline, status)
-- Card fields if available
-- First 500 chars of OCR text
-
-## 6. PASSWORD — Обновление пароля
-
-**Trigger:** "обнови пароль СЭД", "новый пароль СЭД"
-
-```python
+```bash
+python3 -c "
+import sys; sys.path.insert(0, '/workspace/.claude/skills/sed-monitor')
 from config.settings import save_auth
-save_auth(login="Панков И.Ю.", user_id="81081", group_id="33364", password="NEW_PASSWORD")
+save_auth(login='Панков И.Ю.', user_id='81081', group_id='33364', password='NEW_PASSWORD')
+print('OK')
+"
 ```
 
-1. Ask owner for new password
-2. Save via `save_auth()` (file permissions 0600)
-3. Force re-authenticate: `sed_client.authenticate(force=True)`
-4. Report success/failure
+1. Спроси пароль у owner'а
+2. Подставь в команду выше
+3. Проверь: `python3 $SED_DIR/cli.py connectivity`
 
-## 7. DOWNLOAD — Скачать документ как PDF
+## Формат ответа
 
-**Trigger:** "скачай документ", "пришли документ", "дай PDF"
+При выдаче информации о документе показывай:
+- Номер, дата регистрации, краткое содержание
+- Резолюции: кто → кому, текст, дедлайн, статус
+- OCR-текст (первые 500 символов, если есть)
 
-```python
-from services.monitor import download_document
-pdf_path = download_document(doc_id)
-# pdf_path → отправить через send_to_user как файл
-```
-
-Скачивает страницы-сканы (JPEG) через sed-proxy и склеивает в PDF (Pillow или img2pdf).
-Отправить owner'у через Telegram.
-
-## 8. UNVIEWED — Непросмотренные
-
-**Trigger:** "непросмотренные", "новые документы"
-
-```python
-from services.db import get_unviewed_documents
-docs = get_unviewed_documents()
-```
+При резолюциях группируй по статусу, выделяй просроченные.
 
 ## Data Model
 
 | Table | Purpose |
 |-------|---------|
-| documents | Document metadata (number, date, content, folder, viewed) |
-| resolutions | Who assigned what to whom (author, assignee, text, deadline) |
-| document_cards | Full card JSON |
-| pages | OCR text per page |
-| sync_log | Sync history |
+| documents | Метаданные документа (номер, дата, содержание, папка) |
+| resolutions | Кто кому что расписал (автор, исполнитель, текст, дедлайн) |
+| document_cards | Полная карточка (JSON) |
+| pages | OCR-текст по страницам |
+| sync_log | История синхронизаций |
 
-## Security Notes
+## Security
 
-- Password stored in `/data/sed_auth.json` with 0600 permissions
-- Client certificate: `/data/sed/cert.pem` + `key.pem` (GOST, valid until 2027-03-06)
-- All traffic via sed-proxy sidecar (no direct GOST TLS from jobs container)
-- Read-only operations only — no document modifications
-- Random delays between requests (0.3-1.5s) to avoid detection
+- Пароль: `/data/sed_auth.json` (0600)
+- Сертификат: `/data/sed/cert.pem` + `key.pem` (ГОСТ, до 2027-03-06)
+- Трафик через sed-proxy sidecar
+- Только чтение, без управляющих воздействий
+- Рандомные задержки между запросами
