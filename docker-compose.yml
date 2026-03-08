@@ -79,6 +79,10 @@ services:
     build: ./sed-proxy
     environment:
       - SED_SERVER=doc.rscc.ru
+      - HTTP_PROXY=
+      - HTTPS_PROXY=
+      - http_proxy=
+      - https_proxy=
     volumes:
       - ./data/sed:/certs:ro
     restart: unless-stopped
