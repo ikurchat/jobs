@@ -11,7 +11,9 @@ All requests go through sed-proxy (plain HTTP), which handles GOST TLS.
 import json
 import logging
 import re
+import tempfile
 import time
+from pathlib import Path
 from urllib.parse import urlencode
 
 import requests
@@ -284,6 +286,79 @@ def get_counters() -> dict | None:
     if data and "counters" in data:
         return data["counters"]
     return None
+
+
+def download_page_image(url: str, save_to: Path) -> bool:
+    """Download a single page image via sed-proxy. Returns True on success."""
+    if not _ensure_auth():
+        return False
+
+    proxy = get_proxy_url()
+    sess = _get_session()
+    try:
+        resp = sess.get(
+            f"{proxy}/file{url}",
+            headers={"X-SED-Cookies": _cookies_header()},
+            timeout=30,
+        )
+        if resp.status_code == 200 and len(resp.content) > 100:
+            save_to.parent.mkdir(parents=True, exist_ok=True)
+            save_to.write_bytes(resp.content)
+            return True
+        return False
+    except Exception as e:
+        log.error(f"Failed to download page image: {e}")
+        return False
+
+
+def download_document_pdf(doc_id: str, output_path: Path | None = None) -> Path | None:
+    """Download all pages of a document and assemble into PDF.
+
+    Returns path to PDF file, or None on failure.
+    """
+    pages = get_pages(doc_id)
+    if not pages:
+        log.warning(f"No pages for document {doc_id}")
+        return None
+
+    # Download all page images to temp dir
+    with tempfile.TemporaryDirectory(prefix="sed_doc_") as tmpdir:
+        image_paths = []
+        for p in sorted(pages, key=lambda x: x.get("n", 0)):
+            url = p.get("url", "")
+            if not url:
+                continue
+            img_path = Path(tmpdir) / f"page_{p.get('n', 0):03d}.jpg"
+            if download_page_image(url, img_path):
+                image_paths.append(img_path)
+            time.sleep(0.3)
+
+        if not image_paths:
+            log.warning(f"No images downloaded for {doc_id}")
+            return None
+
+        # Assemble PDF
+        if output_path is None:
+            output_path = Path(f"/tmp/sed_doc_{doc_id}.pdf")
+
+        try:
+            from PIL import Image
+            images = [Image.open(p).convert("RGB") for p in image_paths]
+            images[0].save(output_path, "PDF", save_all=True,
+                           append_images=images[1:])
+            log.info(f"PDF created: {output_path} ({len(images)} pages)")
+            return output_path
+        except ImportError:
+            # Fallback: img2pdf (lighter dependency)
+            try:
+                import img2pdf
+                with open(output_path, "wb") as f:
+                    f.write(img2pdf.convert([str(p) for p in image_paths]))
+                log.info(f"PDF created: {output_path} ({len(image_paths)} pages)")
+                return output_path
+            except ImportError:
+                log.error("Neither Pillow nor img2pdf available for PDF assembly")
+                return None
 
 
 def check_connectivity() -> dict:

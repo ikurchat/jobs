@@ -5,6 +5,7 @@ description: >
   "найди документ", "документ номер", "резолюции", "мои резолюции",
   "статус СЭД", "синхронизация СЭД", "обнови пароль СЭД",
   "что мне расписали", "непросмотренные документы", "поиск в СЭД",
+  "скачай документ", "пришли документ", "дай PDF",
   link contains "doc.rscc.ru".
 tools: Read, Bash, Grep, Glob
 ---
@@ -108,7 +109,20 @@ save_auth(login="Панков И.Ю.", user_id="81081", group_id="33364", passwo
 3. Force re-authenticate: `sed_client.authenticate(force=True)`
 4. Report success/failure
 
-## 7. UNVIEWED — Непросмотренные
+## 7. DOWNLOAD — Скачать документ как PDF
+
+**Trigger:** "скачай документ", "пришли документ", "дай PDF"
+
+```python
+from services.monitor import download_document
+pdf_path = download_document(doc_id)
+# pdf_path → отправить через send_to_user как файл
+```
+
+Скачивает страницы-сканы (JPEG) через sed-proxy и склеивает в PDF (Pillow или img2pdf).
+Отправить owner'у через Telegram.
+
+## 8. UNVIEWED — Непросмотренные
 
 **Trigger:** "непросмотренные", "новые документы"
 

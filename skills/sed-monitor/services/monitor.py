@@ -214,6 +214,13 @@ def get_my_summary(assignee: str = "Панков") -> dict:
     }
 
 
+def download_document(doc_id: str) -> str | None:
+    """Download document as PDF. Returns file path or None."""
+    from pathlib import Path
+    pdf_path = sed_client.download_document_pdf(doc_id)
+    return str(pdf_path) if pdf_path else None
+
+
 def check_status() -> dict:
     """Full status check: connectivity + DB stats."""
     connectivity = sed_client.check_connectivity()
