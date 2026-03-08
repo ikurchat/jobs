@@ -45,15 +45,6 @@ result = run_sync(sync_type="manual")
 # Показать: new_documents, new_resolutions, errors
 ```
 
-**Scheduled:** weekdays 09:00±5min, 17:00±5min
-```python
-schedule_task(
-    task_id="sed_morning_sync",
-    cron="0 9 * * 1-5",          # +random 0-5 min jitter
-    action="run_sync('scheduled')"
-)
-```
-
 ## 3. MY_RESOLUTIONS — Мои резолюции
 
 **Trigger:** "что мне расписали", "мои резолюции", "мои документы"
@@ -125,16 +116,6 @@ save_auth(login="Панков И.Ю.", user_id="81081", group_id="33364", passwo
 from services.db import get_unviewed_documents
 docs = get_unviewed_documents()
 ```
-
-## Schedule
-
-Weekday sync — утро и вечер:
-```
-schedule_task(task_id="sed_sync_morning", cron="0 9 * * 1-5", jitter_minutes=5)
-schedule_task(task_id="sed_sync_evening", cron="0 17 * * 1-5", jitter_minutes=5)
-```
-
-After sync, if new_documents > 0 or new_resolutions > 0 → notify owner.
 
 ## Data Model
 
