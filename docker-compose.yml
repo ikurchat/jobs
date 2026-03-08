@@ -13,8 +13,8 @@ services:
       - GMAIL_EMAIL=${GMAIL_EMAIL}
       - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
-      - NO_PROXY=osint,browser,localhost,127.0.0.1
-      - no_proxy=osint,browser,localhost,127.0.0.1
+      - NO_PROXY=osint,browser,sed-proxy,localhost,127.0.0.1
+      - no_proxy=osint,browser,sed-proxy,localhost,127.0.0.1
     volumes:
       - ./data:/data              # Персистентные данные (сессия, БД)
       - ./data/.claude:/home/jobs/.claude  # Claude Code credentials
@@ -74,6 +74,20 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  sed-proxy:
+    build: ./sed-proxy
+    environment:
+      - SED_SERVER=doc.rscc.ru
+    volumes:
+      - ./data/sed:/certs:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8443/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   updater:
     build: ./updater

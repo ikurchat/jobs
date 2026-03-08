@@ -1,0 +1,29 @@
+{
+  "server": "doc.rscc.ru",
+  "proxy_url": "http://sed-proxy:8443",
+  "auth_file": "/data/sed_auth.json",
+  "cert_dir": "/data/sed",
+  "db_path": "/data/sed_monitor.db",
+
+  "user": {
+    "login": "Панков И.Ю.",
+    "user_id": "81081",
+    "group_id": "33364"
+  },
+
+  "monitor": {
+    "folders": "all",
+    "schedule_weekdays": true,
+    "schedule_morning": "09:00",
+    "schedule_evening": "17:00",
+    "jitter_minutes": 5,
+    "page_size": 50,
+    "days_back_default": 14
+  },
+
+  "notify": {
+    "new_documents": true,
+    "new_resolutions": true,
+    "unviewed_reminder": true
+  }
+}
