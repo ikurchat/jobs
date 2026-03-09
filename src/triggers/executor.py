@@ -1,8 +1,9 @@
 """
 TriggerExecutor — единая точка выполнения TriggerEvent.
 
-Принимает событие, отправляет preview, запрашивает агента,
-проверяет silent_marker, доставляет результат owner'у.
+Принимает событие, запрашивает агента,
+проверяет silent_marker и quiet hours, доставляет результат owner'у.
+Preview отправляется ПОСЛЕ проверки silent — чтобы не спамить.
 
 Каждое выполнение получает одноразовую сессию —
 параллельные задачи не блокируют друг друга и не прерывают owner.
@@ -19,6 +20,10 @@ from loguru import logger
 from src.config import settings
 from src.triggers.models import TriggerEvent
 from src.users.session_manager import SessionManager
+
+# Quiet hours: не отправлять owner'у уведомления в это время
+QUIET_HOURS_START = 23  # 23:00
+QUIET_HOURS_END = 8     # 08:00
 
 from typing import TYPE_CHECKING
 
@@ -41,19 +46,15 @@ class TriggerExecutor:
         """
         Выполняет событие триггера в одноразовой сессии.
 
-        1. Отправляет preview_message owner'у (если есть)
-        2. Запрашивает агента через ephemeral background session
-        3. Проверяет silent_marker — если есть, не доставляет
-        4. Добавляет result_prefix, truncate, отправляет owner'у
+        1. Запрашивает агента через ephemeral background session
+        2. Проверяет silent_marker — если есть, не доставляет
+        3. Проверяет quiet hours — если ночь, откладывает (логирует)
+        4. Отправляет preview + result owner'у
 
         Returns:
-            Ответ агента или None (если silent).
+            Ответ агента или None (если silent/quiet).
         """
         logger.debug(f"Executing trigger event: {event.source}")
-
-        # Preview (без буферизации — это просто уведомление)
-        if event.preview_message and event.notify_owner:
-            await self.send_to_owner(event.preview_message, buffer=False)
 
         # Одноразовая сессия с owner tools
         session = self._session_manager.create_background_session()
@@ -93,11 +94,28 @@ class TriggerExecutor:
                 result=content,
             )
 
-        # Deliver
+        # Quiet hours check
+        if event.notify_owner and self._is_quiet_hours():
+            logger.info(f"Trigger {event.source}: suppressed (quiet hours)")
+            return content
+
+        # Deliver: preview + result
         if event.notify_owner:
+            if event.preview_message:
+                await self.send_to_owner(event.preview_message, buffer=False)
             await self.send_to_owner(content)
 
         return content
+
+    def _is_quiet_hours(self) -> bool:
+        """Проверяет, попадает ли текущее время в quiet hours."""
+        now = datetime.now(tz=settings.get_timezone())
+        hour = now.hour
+        if QUIET_HOURS_START > QUIET_HOURS_END:
+            # Ночной диапазон (23:00 - 08:00)
+            return hour >= QUIET_HOURS_START or hour < QUIET_HOURS_END
+        else:
+            return QUIET_HOURS_START <= hour < QUIET_HOURS_END
 
     async def send_to_owner(self, text: str, buffer: bool = True) -> None:
         """

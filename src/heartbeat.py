@@ -35,6 +35,10 @@ DEFAULT_INTERVAL_MINUTES = 30
 
 MAX_MESSAGE_LENGTH = 4000
 
+# Quiet hours: не отправлять уведомления owner'у
+QUIET_HOURS_START = 23  # 23:00
+QUIET_HOURS_END = 8     # 08:00
+
 
 class HeartbeatRunner:
     """
@@ -61,6 +65,15 @@ class HeartbeatRunner:
         self._running = False
         self._task: asyncio.Task | None = None
         self._last_reminder: dict[str, datetime] = {}  # rate limiting: "reminder:{user_id}" → last sent
+
+    def _is_quiet_hours(self) -> bool:
+        """Проверяет, попадает ли текущее время в quiet hours."""
+        now = datetime.now(tz=settings.get_timezone())
+        hour = now.hour
+        if QUIET_HOURS_START > QUIET_HOURS_END:
+            return hour >= QUIET_HOURS_START or hour < QUIET_HOURS_END
+        else:
+            return QUIET_HOURS_START <= hour < QUIET_HOURS_END
 
     async def start(self) -> None:
         """Запускает heartbeat loop."""
@@ -120,14 +133,17 @@ class HeartbeatRunner:
         else:
             content = content.replace(HEARTBEAT_OK_MARKER, "").strip()
             if content:
-                message = f"\U0001f4a1\n{content}"
-                if len(message) > MAX_MESSAGE_LENGTH:
-                    message = message[:MAX_MESSAGE_LENGTH] + "..."
-                await self._transport.send_message(settings.primary_owner_id, message)
-                logger.info(f"Heartbeat notification sent: {content[:80]}...")
+                if self._is_quiet_hours():
+                    logger.info(f"Heartbeat: suppressed (quiet hours): {content[:80]}...")
+                else:
+                    message = f"\U0001f4a1\n{content}"
+                    if len(message) > MAX_MESSAGE_LENGTH:
+                        message = message[:MAX_MESSAGE_LENGTH] + "..."
+                    await self._transport.send_message(settings.primary_owner_id, message)
+                    logger.info(f"Heartbeat notification sent: {content[:80]}...")
 
-        # 4. Если task sessions вернули сообщения — отправляем
-        if task_messages:
+        # 4. Если task sessions вернули сообщения — отправляем (с учётом quiet hours)
+        if task_messages and not self._is_quiet_hours():
             combined = "\n".join(task_messages)
             await self._transport.send_message(settings.primary_owner_id, f"💎 Задачи:\n{combined}")
 
