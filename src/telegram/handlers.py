@@ -25,6 +25,7 @@ from src.triggers.executor import TriggerExecutor
 from src.media import transcribe_audio, save_media, MAX_MEDIA_SIZE
 from src.updater import Updater
 from src.telegram.transport import Transport, TransportMode, IncomingMessage
+from src.telegram.outbox import get_outbox
 from src.telegram import group_log
 
 MAX_TG_LENGTH = 4000
@@ -264,9 +265,14 @@ class TelegramHandlers:
         return await msg.transport.reply_with_entities(msg, f"{icon} {text}", entities)
 
     async def _send_message(self, user_id: int, text: str) -> None:
-        """Отправляет сообщение пользователю (для user tools)."""
+        """Отправляет сообщение пользователю (для user tools) через outbox."""
         logger.info(f"_send_message: user_id={user_id}, text={text[:60]}...")
-        await self._primary.send_message(user_id, text)
+        outbox = get_outbox()
+        await outbox.send(
+            user_id, text,
+            self._primary.send_message,
+            user_id, text,
+        )
 
         session_manager = get_session_manager()
 
@@ -340,7 +346,12 @@ class TelegramHandlers:
 
             if response and response != "Нет ответа":
                 logger.info(f"Owner autonomous response: {response[:80]}...")
-                await self._primary.send_message(user_id, response[:MAX_TG_LENGTH])
+                outbox = get_outbox()
+                await outbox.send(
+                    user_id, response[:MAX_TG_LENGTH],
+                    self._primary.send_message,
+                    user_id, response[:MAX_TG_LENGTH],
+                )
             else:
                 logger.info("Owner autonomous query: no actionable response")
         except Exception as e:
@@ -461,7 +472,12 @@ class TelegramHandlers:
                 preview = (msg.text or "[медиа]")[:100]
                 notify = f"Новый контакт: {name.strip()}{tag} (id:{user_id})\nСообщение: {preview}"
                 try:
-                    await self._primary.send_message(settings.primary_owner_id, notify)
+                    outbox = get_outbox()
+                    await outbox.send(
+                        settings.primary_owner_id, notify,
+                        self._primary.send_message,
+                        settings.primary_owner_id, notify,
+                    )
                 except Exception as e:
                     logger.error(f"Failed to notify owner about new contact: {e}")
 

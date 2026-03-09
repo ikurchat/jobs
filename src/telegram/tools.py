@@ -127,13 +127,24 @@ async def tg_send_message(args: dict[str, Any]) -> dict[str, Any]:
         if not allowed:
             return _error(f"BLOCKED: {reason}. Use whitelist_user() to approve this recipient.")
 
+        from src.telegram.outbox import get_outbox
+        outbox = get_outbox()
+
         # Если Telethon доступен и нужен reply_to — используем его напрямую
         if _telethon_client and reply_to:
             entity = await _resolve_entity(chat_id)
-            result = await _telethon_client.send_message(entity, message, reply_to=reply_to)
-            msg_id = result.id
+            result = await outbox.send(
+                chat_id, message,
+                _telethon_client.send_message,
+                entity, message, reply_to=reply_to,
+            )
+            msg_id = result.id if result and hasattr(result, "id") else result
         else:
-            msg_id = await transport.send_message(chat_id, message)
+            msg_id = await outbox.send(
+                chat_id, message,
+                transport.send_message,
+                chat_id, message,
+            )
         return _text(f"Сообщение отправлено в {chat} (ID: {msg_id}):\n{message}")
     except Exception as e:
         return _error(f"Ошибка отправки: {e}")
