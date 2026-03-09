@@ -31,12 +31,14 @@ _tz = settings.get_timezone()
 @tool(
     "schedule_task",
     "Schedule a task. Time format: 'HH:MM' for today, 'YYYY-MM-DD HH:MM' for specific date. "
-    "Repeat: '24h', '1h', '30m', or None. prompt is optional (defaults to title).",
+    "Repeat: '24h', '1h', '30m', or None. prompt is optional (defaults to title). "
+    "skip_holidays: true to skip Russian public holidays and weekends (default true for daily+ repeats).",
     {
         "title": str,
         "prompt": str,
         "time": str,
         "repeat": str,
+        "skip_holidays": bool,
     },
 )
 async def schedule_task(args: dict[str, Any]) -> dict[str, Any]:
@@ -44,6 +46,7 @@ async def schedule_task(args: dict[str, Any]) -> dict[str, Any]:
     prompt: str | None = args.get("prompt")
     time_str: str | None = args.get("time")
     repeat: str | None = args.get("repeat")
+    skip_holidays: bool | None = args.get("skip_holidays")
 
     if not title and not prompt:
         return _error("title или prompt обязателен")
@@ -67,11 +70,17 @@ async def schedule_task(args: dict[str, Any]) -> dict[str, Any]:
     # Парсим repeat
     repeat_seconds = _parse_repeat(repeat) if repeat else None
 
+    # skip_holidays: по умолчанию true для daily+ повторов
+    if skip_holidays is None:
+        skip_holidays = repeat_seconds is not None and repeat_seconds >= 86400
+
     # Создаём Task с kind="scheduled"
     from src.users.repository import get_users_repository
     repo = get_users_repository()
 
     context = {"prompt": prompt} if prompt else {}
+    if skip_holidays:
+        context["skip_holidays"] = True
 
     task = await repo.create_task(
         title=title,
@@ -159,6 +168,19 @@ class SchedulerRunner:
         tasks = await repo.get_scheduled_due()
 
         for task in tasks:
+            # Проверка производственного календаря
+            if task.context.get("skip_holidays"):
+                from src.workdays import is_holiday
+                if is_holiday():
+                    logger.info(f"Skipping [{task.id}]: holiday/weekend")
+                    # Для repeating — сдвигаем на следующий цикл
+                    if task.schedule_repeat:
+                        next_at = datetime.now() + timedelta(seconds=task.schedule_repeat)
+                        await repo.update_schedule(task.id, next_at)
+                    else:
+                        await repo.update_schedule(task.id, None)
+                    continue
+
             base_prompt = task.context.get("prompt") or task.title
             logger.info(f"Executing [{task.id}]: {base_prompt[:40]}")
 

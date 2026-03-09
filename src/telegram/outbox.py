@@ -9,11 +9,18 @@ Outbox — очередь исходящих сообщений с dedup и rate
 
 import asyncio
 import hashlib
+import json
 import time
 from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Awaitable
 
 from loguru import logger
+
+# Лог отправок — для аудита кому и что отправлено
+SEND_LOG_PATH = Path("/data/send_log.jsonl")
+SEND_LOG_MAX_LINES = 500
 
 # Настройки
 DEDUP_WINDOW = 60.0  # Окно дедупликации (секунды)
@@ -104,6 +111,7 @@ class Outbox:
                     result = await send_fn(*args, **kwargs)
                     self._last_send[chat_id] = time.monotonic()
                     self._record_sent(chat_id, text)
+                    self._log_send(chat_id, text)
                     return result
                 except Exception as e:
                     retry_after = _extract_retry_after(e)
@@ -114,6 +122,29 @@ class Outbox:
                     raise
 
         return None
+
+
+    def _log_send(self, chat_id: int, text: str) -> None:
+        """Записывает отправку в лог для аудита."""
+        try:
+            entry = {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "chat_id": chat_id,
+                "text": text[:200],
+            }
+            SEND_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(SEND_LOG_PATH, "a") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+            # Ротация
+            if SEND_LOG_PATH.stat().st_size > 100_000:
+                lines = SEND_LOG_PATH.read_text().strip().split("\n")
+                if len(lines) > SEND_LOG_MAX_LINES:
+                    SEND_LOG_PATH.write_text(
+                        "\n".join(lines[-SEND_LOG_MAX_LINES:]) + "\n"
+                    )
+        except Exception:
+            pass  # Не ломаем отправку из-за ошибки логирования
 
 
 def _extract_retry_after(e: Exception) -> float | None:
