@@ -1,7 +1,7 @@
 {
   "server": "doc.rscc.ru",
   "proxy_url": "http://sed-proxy:8443",
-  "auth_file": "/data/sed_auth.json",
+  "token_file": "/data/sed_token.json",
   "cert_dir": "/data/sed",
   "db_path": "/data/sed_monitor.db",
 

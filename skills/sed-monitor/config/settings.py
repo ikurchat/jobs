@@ -2,10 +2,14 @@
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = SKILL_DIR / "config.json"
+
+_TOKEN_PATH = Path("/data/sed_token.json")
+_USER_ID = "81081"
 
 
 def load_config(config_path: Path | None = None) -> dict:
@@ -14,36 +18,33 @@ def load_config(config_path: Path | None = None) -> dict:
         return json.load(f)
 
 
-def get_auth() -> dict:
-    """Load SED credentials from secured file.
+def get_token() -> dict | None:
+    """Load saved SED token.
 
-    Returns: {"login": ..., "user_id": ..., "group_id": ..., "password": ...}
+    Returns: {"dnsid": ..., "auth_token": ..., "created": ...} or None.
     """
-    config = load_config()
-    auth_file = Path(config.get("auth_file", "/data/sed_auth.json"))
-    if not auth_file.exists():
-        raise FileNotFoundError(
-            f"SED auth file not found: {auth_file}. "
-            "Create it: owner says 'обнови пароль СЭД'"
-        )
-    with open(auth_file, "r", encoding="utf-8") as f:
+    if not _TOKEN_PATH.exists():
+        return None
+    with open(_TOKEN_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def save_auth(login: str, user_id: str, group_id: str, password: str) -> None:
-    """Save SED credentials to secured file."""
-    config = load_config()
-    auth_file = Path(config.get("auth_file", "/data/sed_auth.json"))
-    auth_file.parent.mkdir(parents=True, exist_ok=True)
+def save_token(dnsid: str, auth_token: str) -> None:
+    """Save SED token (DNSID + auth_token). No password stored."""
+    _TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
     data = {
-        "login": login,
-        "user_id": user_id,
-        "group_id": group_id,
-        "password": password,
+        "dnsid": dnsid,
+        "auth_token": auth_token,
+        "user_id": _USER_ID,
+        "created": datetime.now(timezone.utc).isoformat(),
     }
-    with open(auth_file, "w", encoding="utf-8") as f:
+    with open(_TOKEN_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    os.chmod(auth_file, 0o600)
+    os.chmod(_TOKEN_PATH, 0o600)
+
+
+def get_user_id() -> str:
+    return _USER_ID
 
 
 def get_proxy_url() -> str:

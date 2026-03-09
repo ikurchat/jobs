@@ -2,11 +2,11 @@
 """CLI for sed-monitor skill.
 
 Usage:
-    python3 cli.py doc <id_or_link>      — отчёт о документе
-    python3 cli.py search <query>        — поиск по номеру/тексту
-    python3 cli.py pdf <id_or_link>      — скачать PDF
-    python3 cli.py check                 — проверить связь
-    python3 cli.py password <password>   — обновить пароль СЭД
+    python3 cli.py doc <id_or_link>          — отчёт о документе
+    python3 cli.py search <query>            — поиск по номеру/тексту
+    python3 cli.py pdf <id_or_link>          — скачать PDF
+    python3 cli.py check                     — проверить связь
+    python3 cli.py token <dnsid> <auth_token> — установить токен авторизации
 """
 
 import json
@@ -178,33 +178,31 @@ def cmd_check():
     parts = []
     parts.append(f"Proxy: {'✅' if result['proxy'] else '❌'}")
     parts.append(f"SED:   {'✅' if result['sed'] else '❌'}")
-    parts.append(f"Auth:  {'✅' if result['auth'] else '❌'}")
+    parts.append(f"Token: {'✅' if result['token'] else '❌'}")
     print("\n".join(parts))
 
     if all(result.values()):
         print("\nВсё работает.")
+    elif not result.get("token"):
+        print("\nТокен не установлен или истёк. Owner должен обновить токен.")
+        sys.exit(1)
     else:
         print("\nЕсть проблемы с подключением.")
         sys.exit(1)
 
 
-def cmd_password(password: str):
-    """Update SED password."""
-    from config.settings import save_auth
-    save_auth(
-        login="Панков И.Ю.",
-        user_id="81081",
-        group_id="33364",
-        password=password,
-    )
-    print("Пароль обновлён.")
+def cmd_token(dnsid: str, auth_token: str):
+    """Set auth token (obtained interactively by owner)."""
+    from services import sed_client
+    sed_client.set_token(dnsid, auth_token)
+    print("Токен сохранён.")
 
     # Verify
-    from services import sed_client
-    if sed_client.authenticate(force=True):
-        print("Аутентификация: ✅")
+    result = sed_client.check_connectivity()
+    if result.get("token"):
+        print("Проверка: ✅ токен рабочий")
     else:
-        print("Аутентификация: ❌ (пароль сохранён, но войти не удалось)")
+        print("Проверка: ❌ токен не работает")
         sys.exit(1)
 
 
@@ -224,15 +222,13 @@ def main():
             cmd_pdf(sys.argv[2])
         elif cmd == "check":
             cmd_check()
-        elif cmd == "password" and len(sys.argv) >= 3:
-            cmd_password(sys.argv[2])
+        elif cmd == "token" and len(sys.argv) >= 4:
+            cmd_token(sys.argv[2], sys.argv[3])
         else:
             print(__doc__)
             sys.exit(1)
     except FileNotFoundError as e:
         print(f"Ошибка: {e}", file=sys.stderr)
-        if "sed_auth" in str(e):
-            print("Нужно задать пароль: cli.py password <пароль>", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(f"Ошибка: {e}", file=sys.stderr)

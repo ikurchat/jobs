@@ -3,7 +3,7 @@ name: sed-monitor
 description: >
   Use when user asks about СЭД, документы СЭД, "проверь СЭД",
   "найди документ", "документ номер", "резолюции",
-  "статус СЭД", "обнови пароль СЭД",
+  "статус СЭД", "обнови токен СЭД",
   "скачай документ", "пришли документ", "дай PDF",
   link contains "doc.rscc.ru", link contains "sd-praktika.ru".
 tools: Read, Bash
@@ -43,10 +43,11 @@ python3 $SED pdf 875962
 python3 $SED check
 ```
 
-### Обновить пароль
+### Установить токен авторизации
 ```bash
-python3 $SED password "новый_пароль"
+python3 $SED token <dnsid> <auth_token>
 ```
+Токен живёт ~182 дня. Пароль НЕ хранится — только токен.
 
 ## Правила
 

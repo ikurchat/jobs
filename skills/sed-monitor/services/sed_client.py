@@ -1,9 +1,10 @@
 """HTTP client for СЭД Практика via sed-proxy sidecar.
 
-Authentication flow:
-  1. GET /alive → parse DNSID from response headers
-  2. POST /auth → parse auth_token from response headers
-  3. POST /graphql with cookies → GraphQL queries
+Token-based auth:
+  - Token (DNSID + auth_token) stored in /data/sed_token.json
+  - Token lives ~182 days, survives password changes
+  - Password NEVER stored — only used interactively to obtain token
+  - If token is dead → error, owner re-authenticates manually
 
 All requests go through sed-proxy (plain HTTP), which handles GOST TLS.
 """
@@ -14,20 +15,18 @@ import re
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import urlencode
 
 import requests
 
-from config.settings import get_auth, get_proxy_url, load_config
+from config.settings import get_proxy_url, get_token, get_user_id, save_token
 
 log = logging.getLogger("sed-client")
 
-# Session state
+# Session state (in-memory)
 _session: requests.Session | None = None
 _dnsid: str = ""
 _auth_token: str = ""
-_auth_time: float = 0
-_AUTH_TTL = 3600  # re-auth every hour
+_token_loaded: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -49,84 +48,68 @@ def _cookies_header() -> str:
         parts.append(f"DNSID={_dnsid}")
     if _auth_token and _dnsid:
         parts.append(f"auth_token_n_{_dnsid}={_auth_token}")
-    auth = get_auth()
-    parts.append(f"last_login_u_id={auth['user_id']}")
+    parts.append(f"last_login_u_id={get_user_id()}")
     return "; ".join(parts)
 
 
-def _parse_dnsid(raw: str) -> str:
-    """Extract DNSID from proxy response (includes raw HTTP headers)."""
-    m = re.search(r"DNSID=([a-zA-Z0-9_-]+)", raw)
-    return m.group(1) if m else ""
+def _load_token() -> bool:
+    """Load token from file into memory. Returns True if loaded."""
+    global _dnsid, _auth_token, _token_loaded
 
-
-def _parse_auth_token(raw: str, dnsid: str) -> str:
-    """Extract auth_token from proxy response headers."""
-    pattern = rf"auth_token_n_{re.escape(dnsid)}=([^;\s]+)"
-    m = re.search(pattern, raw)
-    return m.group(1) if m else ""
-
-
-def authenticate(force: bool = False) -> bool:
-    """Authenticate to SED. Returns True on success."""
-    global _dnsid, _auth_token, _auth_time
-
-    if not force and _auth_token and (time.time() - _auth_time) < _AUTH_TTL:
+    if _token_loaded and _dnsid and _auth_token:
         return True
 
-    proxy = get_proxy_url()
-    auth = get_auth()
-    sess = _get_session()
-
-    # Step 1: GET /alive → DNSID
-    try:
-        resp = sess.get(f"{proxy}/alive")
-        _dnsid = _parse_dnsid(resp.text)
-        if not _dnsid:
-            log.error("Failed to get DNSID from /alive")
-            return False
-        log.info(f"Got DNSID: {_dnsid[:8]}...")
-    except Exception as e:
-        log.error(f"Alive request failed: {e}")
+    token = get_token()
+    if not token:
         return False
 
-    # Step 2: POST /auth → auth_token
-    query = urlencode({"uri": "/", "DNSID": _dnsid})
-    form_data = urlencode({
-        "DNSID": _dnsid,
-        "group_id": auth["group_id"],
-        "login": auth["login"],
-        "user_id": auth["user_id"],
-        "password": auth["password"],
-        "x": "",
-    })
-    referer = f"https://doc.rscc.ru:444/auth.php?uri=%2F&DNSID={_dnsid}"
+    _dnsid = token.get("dnsid", "")
+    _auth_token = token.get("auth_token", "")
+    _token_loaded = bool(_dnsid and _auth_token)
+    return _token_loaded
 
+
+def _check_token_alive() -> bool:
+    """Verify current token is still valid by making a test request."""
+    if not _dnsid or not _auth_token:
+        return False
+
+    proxy = get_proxy_url()
+    sess = _get_session()
     try:
-        resp = sess.post(
-            f"{proxy}/auth",
-            data=form_data.encode("utf-8"),
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "X-SED-Query": query,
-                "X-SED-Referer": referer,
-            },
+        resp = sess.get(
+            f"{proxy}/web/?url=mont/auth-code/status",
+            headers={"X-SED-Cookies": _cookies_header()},
+            timeout=10,
         )
-        _auth_token = _parse_auth_token(resp.text, _dnsid)
-        if not _auth_token:
-            log.error("Failed to get auth_token from /auth")
-            return False
-        _auth_time = time.time()
-        log.info("SED authentication successful")
-        return True
-    except Exception as e:
-        log.error(f"Auth request failed: {e}")
+        # Non-empty response (even error) = token alive
+        return bool(resp.text.strip())
+    except Exception:
         return False
 
 
 def _ensure_auth() -> bool:
-    """Ensure we have a valid session."""
-    return authenticate()
+    """Ensure we have a valid token. No password flow — token only."""
+    if _load_token():
+        return True
+
+    log.error(
+        "SED token not found. Run: "
+        "python3 $SED token <dnsid> <auth_token>"
+    )
+    return False
+
+
+def set_token(dnsid: str, auth_token: str) -> bool:
+    """Set token manually (called from CLI after interactive auth)."""
+    global _dnsid, _auth_token, _token_loaded
+
+    _dnsid = dnsid
+    _auth_token = auth_token
+    _token_loaded = True
+    save_token(dnsid, auth_token)
+    log.info("Token saved")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +160,7 @@ def get_folders(parent_id: str | None = None) -> list[dict]:
 
 def get_documents(folder_id: str, page_size: int = 50,
                   offset_key: str | None = None) -> dict:
-    """Get documents in a folder. Returns {list, hasMore, offsetKey}."""
+    """Get documents in a folder. Returns {list, hasMore}."""
     if offset_key:
         q = f'''{{ documentList(folderId: "{folder_id}", pageSize: {page_size}, offsetKey: "{offset_key}") {{
             list {{ id number regDate shortContent isViewed category categoryName documentKind pageCount }}
@@ -236,7 +219,6 @@ def get_resolutions(doc_id: str) -> list[dict]:
     data = _graphql(q)
     if data and "resolutionList" in data:
         rlist = data["resolutionList"].get("list", [])
-        # Flatten author/assignee into top-level fields
         result = []
         for r in rlist:
             flat = dict(r)
@@ -312,16 +294,12 @@ def download_page_image(url: str, save_to: Path) -> bool:
 
 
 def download_document_pdf(doc_id: str, output_path: Path | None = None) -> Path | None:
-    """Download all pages of a document and assemble into PDF.
-
-    Returns path to PDF file, or None on failure.
-    """
+    """Download all pages and assemble into PDF."""
     pages = get_pages(doc_id)
     if not pages:
         log.warning(f"No pages for document {doc_id}")
         return None
 
-    # Download all page images to temp dir
     with tempfile.TemporaryDirectory(prefix="sed_doc_") as tmpdir:
         image_paths = []
         for p in sorted(pages, key=lambda x: x.get("n", 0)):
@@ -334,10 +312,8 @@ def download_document_pdf(doc_id: str, output_path: Path | None = None) -> Path 
             time.sleep(0.3)
 
         if not image_paths:
-            log.warning(f"No images downloaded for {doc_id}")
             return None
 
-        # Assemble PDF
         if output_path is None:
             output_path = Path(f"/tmp/sed_doc_{doc_id}.pdf")
 
@@ -346,18 +322,15 @@ def download_document_pdf(doc_id: str, output_path: Path | None = None) -> Path 
             images = [Image.open(p).convert("RGB") for p in image_paths]
             images[0].save(output_path, "PDF", save_all=True,
                            append_images=images[1:])
-            log.info(f"PDF created: {output_path} ({len(images)} pages)")
             return output_path
         except ImportError:
-            # Fallback: img2pdf (lighter dependency)
             try:
                 import img2pdf
                 with open(output_path, "wb") as f:
                     f.write(img2pdf.convert([str(p) for p in image_paths]))
-                log.info(f"PDF created: {output_path} ({len(image_paths)} pages)")
                 return output_path
             except ImportError:
-                log.error("Neither Pillow nor img2pdf available for PDF assembly")
+                log.error("Neither Pillow nor img2pdf available")
                 return None
 
 
@@ -365,7 +338,7 @@ def check_connectivity() -> dict:
     """Check if sed-proxy and SED server are reachable."""
     proxy = get_proxy_url()
     sess = _get_session()
-    result = {"proxy": False, "sed": False, "auth": False}
+    result = {"proxy": False, "sed": False, "token": False}
     try:
         resp = sess.get(f"{proxy}/health", timeout=5)
         result["proxy"] = resp.status_code == 200
@@ -374,10 +347,11 @@ def check_connectivity() -> dict:
 
     try:
         resp = sess.get(f"{proxy}/alive", timeout=15)
-        dnsid = _parse_dnsid(resp.text)
-        result["sed"] = bool(dnsid)
+        result["sed"] = bool(re.search(r"DNSID=", resp.text))
     except Exception:
         return result
 
-    result["auth"] = authenticate(force=True)
+    if _load_token():
+        result["token"] = _check_token_alive()
+
     return result
