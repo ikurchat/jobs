@@ -1,34 +1,211 @@
 #!/usr/bin/env python3
-"""CLI wrapper for sed-monitor — allows agent to call functions via Bash.
+"""CLI for sed-monitor skill.
 
 Usage:
-    python3 cli.py status
-    python3 cli.py sync
-    python3 cli.py document <doc_id>
-    python3 cli.py search <query>
-    python3 cli.py resolutions [assignee]
-    python3 cli.py unviewed
-    python3 cli.py download <doc_id>
-    python3 cli.py text <doc_id>
-    python3 cli.py connectivity
+    python3 cli.py doc <id_or_link>      — отчёт о документе
+    python3 cli.py search <query>        — поиск по номеру/тексту
+    python3 cli.py pdf <id_or_link>      — скачать PDF
+    python3 cli.py check                 — проверить связь
+    python3 cli.py password <password>   — обновить пароль СЭД
 """
 
 import json
+import re
 import sys
 import os
+import traceback
 
-# Add skill dir to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from services import db, sed_client
-from services.monitor import (
-    check_status, download_document, get_document_summary,
-    get_my_summary, run_sync, search_and_fetch, sync_single_document,
-)
+
+def _extract_doc_id(raw: str) -> str:
+    """Extract document ID from a link or raw string.
+
+    Supports:
+      - https://app.sd-praktika.ru/?id=875962
+      - https://doc.rscc.ru:444/web/document/view?id=883493
+      - plain number: 875962
+    """
+    m = re.search(r"[?&]id=(\d+)", raw)
+    if m:
+        return m.group(1)
+    m = re.match(r"^\d+$", raw.strip())
+    if m:
+        return raw.strip()
+    return raw.strip()
 
 
-def _json_out(data):
-    print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+def _format_document_report(summary: dict) -> str:
+    """Format document summary as human-readable report."""
+    doc = summary.get("document", {})
+    resolutions = summary.get("resolutions", [])
+    card = summary.get("card")
+    text = summary.get("text", "")
+    full_len = summary.get("full_text_length", 0)
+
+    lines = []
+
+    # Header
+    number = doc.get("number", "?")
+    date = doc.get("reg_date") or doc.get("regDate") or "—"
+    lines.append(f"📄 Документ №{number} от {date}")
+    folder = doc.get("folder_name", "")
+    if folder:
+        lines.append(f"Папка: {folder}")
+    category = doc.get("category_name") or doc.get("categoryName") or ""
+    if category:
+        lines.append(f"Тип: {category}")
+
+    # Short content
+    short = doc.get("short_content") or doc.get("shortContent") or ""
+    if short:
+        lines.append(f"\n📋 Краткое содержание:\n{short}")
+
+    # Resolutions
+    if resolutions:
+        lines.append(f"\n👥 Резолюции ({len(resolutions)}):")
+        for i, r in enumerate(resolutions, 1):
+            author = r.get("author_name", "?")
+            assignee = r.get("assignee_name", "?")
+            res_text = r.get("resolution_text") or r.get("text") or ""
+            status = r.get("status", "")
+            deadline = r.get("deadline", "")
+
+            lines.append(f"{i}. {author} → {assignee}")
+            if res_text:
+                lines.append(f'   "{res_text}"')
+            parts = []
+            if status:
+                parts.append(f"Статус: {status}")
+            if deadline:
+                parts.append(f"Дедлайн: {deadline}")
+            if parts:
+                lines.append(f"   {' | '.join(parts)}")
+    else:
+        lines.append("\n👥 Резолюции: нет")
+
+    # Card
+    if card:
+        card_data = card.get("card", card) if isinstance(card, dict) else card
+        if isinstance(card_data, dict):
+            card_fields = []
+            for k, v in card_data.items():
+                if k in ("doc_id", "fetched_at"):
+                    continue
+                if v and str(v).strip():
+                    card_fields.append(f"{k}: {v}")
+            if card_fields:
+                lines.append("\n📑 Карточка:")
+                for f in card_fields[:10]:  # max 10 fields
+                    lines.append(f"  {f}")
+
+    # OCR text
+    if text:
+        preview = text[:500]
+        page_count = doc.get("page_count") or doc.get("pageCount") or "?"
+        lines.append(f"\n📝 Текст документа (OCR):")
+        lines.append(preview)
+        if full_len > 500:
+            lines.append(f"...\n[всего {page_count} стр., {full_len} символов]")
+    else:
+        lines.append("\n📝 OCR-текст: не загружен")
+
+    return "\n".join(lines)
+
+
+def _format_search_results(docs: list) -> str:
+    """Format search results as human-readable list."""
+    if not docs:
+        return "Документы не найдены."
+
+    lines = [f"Найдено документов: {len(docs)}\n"]
+    for doc in docs[:20]:
+        num = doc.get("number", "?")
+        date = doc.get("regDate") or doc.get("reg_date") or ""
+        short = doc.get("shortContent") or doc.get("short_content") or ""
+        doc_id = doc.get("id", "")
+        viewed = "👁" if doc.get("isViewed") else "🆕"
+        lines.append(f"{viewed} №{num} от {date} [id:{doc_id}]")
+        if short:
+            lines.append(f"   {short[:80]}")
+    return "\n".join(lines)
+
+
+def cmd_doc(raw_id: str):
+    """Get full document report."""
+    from services.monitor import get_document_summary, sync_single_document
+
+    doc_id = _extract_doc_id(raw_id)
+
+    # Try local DB first
+    summary = get_document_summary(doc_id)
+    if not summary:
+        # Fetch from SED
+        result = sync_single_document(doc_id)
+        if result:
+            summary = get_document_summary(doc_id)
+
+    if not summary:
+        print(f"Документ {doc_id} не найден в СЭД.")
+        sys.exit(1)
+
+    print(_format_document_report(summary))
+
+
+def cmd_search(query: str):
+    """Search documents."""
+    from services.monitor import search_and_fetch
+    docs = search_and_fetch(query)
+    print(_format_search_results(docs))
+
+
+def cmd_pdf(raw_id: str):
+    """Download document as PDF."""
+    from services.monitor import download_document
+    doc_id = _extract_doc_id(raw_id)
+    path = download_document(doc_id)
+    if path:
+        print(f"PDF: {path}")
+    else:
+        print("Не удалось скачать PDF. Проверьте ID и связь с СЭД.", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_check():
+    """Check connectivity."""
+    from services import sed_client
+    result = sed_client.check_connectivity()
+    parts = []
+    parts.append(f"Proxy: {'✅' if result['proxy'] else '❌'}")
+    parts.append(f"SED:   {'✅' if result['sed'] else '❌'}")
+    parts.append(f"Auth:  {'✅' if result['auth'] else '❌'}")
+    print("\n".join(parts))
+
+    if all(result.values()):
+        print("\nВсё работает.")
+    else:
+        print("\nЕсть проблемы с подключением.")
+        sys.exit(1)
+
+
+def cmd_password(password: str):
+    """Update SED password."""
+    from config.settings import save_auth
+    save_auth(
+        login="Панков И.Ю.",
+        user_id="81081",
+        group_id="33364",
+        password=password,
+    )
+    print("Пароль обновлён.")
+
+    # Verify
+    from services import sed_client
+    if sed_client.authenticate(force=True):
+        print("Аутентификация: ✅")
+    else:
+        print("Аутентификация: ❌ (пароль сохранён, но войти не удалось)")
+        sys.exit(1)
 
 
 def main():
@@ -38,72 +215,27 @@ def main():
 
     cmd = sys.argv[1]
 
-    if cmd == "status":
-        _json_out(check_status())
-
-    elif cmd == "connectivity":
-        _json_out(sed_client.check_connectivity())
-
-    elif cmd == "sync":
-        _json_out(run_sync(sync_type="manual"))
-
-    elif cmd == "document":
-        if len(sys.argv) < 3:
-            print("Usage: cli.py document <doc_id>")
-            sys.exit(1)
-        doc_id = sys.argv[2]
-        # Try local DB first, then fetch from SED
-        summary = get_document_summary(doc_id)
-        if not summary:
-            result = sync_single_document(doc_id)
-            if result:
-                summary = get_document_summary(doc_id)
-        _json_out(summary or {"error": f"Document {doc_id} not found"})
-
-    elif cmd == "search":
-        if len(sys.argv) < 3:
-            print("Usage: cli.py search <query>")
-            sys.exit(1)
-        query = " ".join(sys.argv[2:])
-        docs = search_and_fetch(query)
-        _json_out({"count": len(docs), "documents": docs})
-
-    elif cmd == "resolutions":
-        assignee = sys.argv[2] if len(sys.argv) > 2 else "Панков"
-        _json_out(get_my_summary(assignee))
-
-    elif cmd == "unviewed":
-        docs = db.get_unviewed_documents()
-        _json_out({"count": len(docs), "documents": docs})
-
-    elif cmd == "download":
-        if len(sys.argv) < 3:
-            print("Usage: cli.py download <doc_id>")
-            sys.exit(1)
-        path = download_document(sys.argv[2])
-        if path:
-            print(f"PDF saved: {path}")
+    try:
+        if cmd == "doc" and len(sys.argv) >= 3:
+            cmd_doc(sys.argv[2])
+        elif cmd == "search" and len(sys.argv) >= 3:
+            cmd_search(" ".join(sys.argv[2:]))
+        elif cmd == "pdf" and len(sys.argv) >= 3:
+            cmd_pdf(sys.argv[2])
+        elif cmd == "check":
+            cmd_check()
+        elif cmd == "password" and len(sys.argv) >= 3:
+            cmd_password(sys.argv[2])
         else:
-            print("Download failed", file=sys.stderr)
+            print(__doc__)
             sys.exit(1)
-
-    elif cmd == "text":
-        if len(sys.argv) < 3:
-            print("Usage: cli.py text <doc_id>")
-            sys.exit(1)
-        doc_id = sys.argv[2]
-        # Ensure we have pages
-        if not db.get_pages(doc_id):
-            sync_single_document(doc_id)
-        text = db.get_document_text(doc_id)
-        print(text or "Текст не найден")
-
-    elif cmd == "stats":
-        _json_out(db.get_stats())
-
-    else:
-        print(f"Unknown command: {cmd}")
-        print(__doc__)
+    except FileNotFoundError as e:
+        print(f"Ошибка: {e}", file=sys.stderr)
+        if "sed_auth" in str(e):
+            print("Нужно задать пароль: cli.py password <пароль>", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Ошибка: {e}", file=sys.stderr)
         sys.exit(1)
 
 

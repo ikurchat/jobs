@@ -212,13 +212,13 @@ def get_document(doc_id: str) -> dict | None:
 
 def search_documents(keyword: str, page_size: int = 50) -> list[dict]:
     """Search documents by keyword (number, content)."""
-    q = """query($keyword: String) {
+    q = """query($keyword: String, $ps: Int) {
         documentListFiltered(pageSize: $ps, filter: { keyword: $keyword }) {
             list { id number regDate shortContent isViewed category categoryName pageCount }
             hasMore
         }
-    }""".replace("$ps", str(page_size))
-    data = _graphql(q, variables={"keyword": keyword})
+    }"""
+    data = _graphql(q, variables={"keyword": keyword, "ps": page_size})
     if data and "documentListFiltered" in data:
         return data["documentListFiltered"].get("list", [])
     return []
@@ -364,15 +364,16 @@ def download_document_pdf(doc_id: str, output_path: Path | None = None) -> Path 
 def check_connectivity() -> dict:
     """Check if sed-proxy and SED server are reachable."""
     proxy = get_proxy_url()
+    sess = _get_session()
     result = {"proxy": False, "sed": False, "auth": False}
     try:
-        resp = requests.get(f"{proxy}/health", timeout=5)
+        resp = sess.get(f"{proxy}/health", timeout=5)
         result["proxy"] = resp.status_code == 200
     except Exception:
         return result
 
     try:
-        resp = requests.get(f"{proxy}/alive", timeout=15)
+        resp = sess.get(f"{proxy}/alive", timeout=15)
         dnsid = _parse_dnsid(resp.text)
         result["sed"] = bool(dnsid)
     except Exception:
